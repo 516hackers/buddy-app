@@ -1,579 +1,776 @@
+
+import threading
+import subprocess
+import time
+import os
+
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.label import Label
-from kivy.uix.switch import Switch
 from kivy.uix.button import Button
-from kivy.uix.popup import Popup
 from kivy.uix.widget import Widget
-from kivy.graphics import Color, RoundedRectangle, Rectangle, Ellipse, Line
+from kivy.uix.popup import Popup
+from kivy.graphics import (Color, RoundedRectangle,
+                            Rectangle, Ellipse, Line)
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.animation import Animation
-import threading
-import subprocess
-import os
-import time
-import platform
 
-# ── Window setup ──────────────────────────────────────────────
+# ── window colour (Android ignores Window.size, that's fine) ──
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
 
-# ── Optional imports ──────────────────────────────────────────
+# ── safe optional imports ──────────────────────────────────────
 try:
     import speech_recognition as sr
-    SPEECH_OK = True
+    SR_OK = True
 except Exception:
-    SPEECH_OK = False
+    SR_OK = False
 
-try:
-    import pyttsx3
-    TTS_OK = True
-except Exception:
-    TTS_OK = False
+# ── palette ───────────────────────────────────────────────────
+BG      = (0.04, 0.04, 0.06, 1)
+CARD    = (0.09, 0.09, 0.13, 1)
+SURF    = (0.13, 0.13, 0.18, 1)
+ACCENT  = (0.42, 0.38, 1.00, 1)
+GREEN   = (0.20, 0.85, 0.45, 1)
+DIM     = (0.28, 0.28, 0.40, 1)
+SEC     = (0.55, 0.55, 0.68, 1)
+PRI     = (0.92, 0.92, 0.96, 1)
+BORDER  = (0.18, 0.18, 0.26, 1)
 
-# ── Colors ────────────────────────────────────────────────────
-C_BG      = (0.04, 0.04, 0.06, 1)
-C_CARD    = (0.07, 0.07, 0.10, 1)
-C_SURFACE = (0.10, 0.10, 0.15, 1)
-C_ACCENT  = (0.42, 0.39, 1.00, 1)
-C_GREEN   = (0.26, 0.91, 0.48, 1)
-C_DIM     = (0.27, 0.27, 0.40, 1)
-C_SEC     = (0.53, 0.53, 0.67, 1)
-C_PRI     = (0.93, 0.93, 0.96, 1)
-C_BORDER  = (0.16, 0.16, 0.24, 1)
-
-WAKE_WORD = "hello buddy"
-CMD_WA    = "open whatsapp"
+WAKE = "hello buddy"
+CMD_WA = "open whatsapp"
 
 
-def open_whatsapp():
-    try:
-        subprocess.Popen(
-            ["am", "start", "-n", "com.whatsapp/.Main"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        return True
-    except Exception:
+# ══════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════
+def launch_whatsapp():
+    """Try every known way to open WhatsApp on Android."""
+    cmds = [
+        ["am", "start", "-n", "com.whatsapp/.Main"],
+        ["am", "start", "-a", "android.intent.action.VIEW",
+         "-d", "whatsapp://"],
+        ["am", "start", "-n",
+         "com.whatsapp.w4b/.Main"],          # WhatsApp Business
+    ]
+    for cmd in cmds:
         try:
-            subprocess.Popen(
-                ["am", "start", "-a", "android.intent.action.VIEW",
-                 "-d", "whatsapp://"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+            r = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=4
             )
-            return True
+            if r.returncode == 0:
+                return True
         except Exception:
-            return False
+            pass
+    return False
 
 
-def speak_async(text):
-    if TTS_OK:
-        def _speak():
-            try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", 170)
-                engine.say(text)
-                engine.runAndWait()
-            except Exception:
-                pass
-        threading.Thread(target=_speak, daemon=True).start()
-
-
+# ══════════════════════════════════════════════════════════════
+#  CARD  (rounded dark container)
+# ══════════════════════════════════════════════════════════════
 class Card(BoxLayout):
     def __init__(self, **kw):
         super().__init__(**kw)
         self.orientation = "vertical"
-        self.padding = [dp(16), dp(12)]
-        self.spacing = dp(8)
+        self.padding     = [dp(16), dp(12), dp(16), dp(12)]
+        self.spacing     = dp(6)
         with self.canvas.before:
-            Color(*C_CARD)
-            self._rect = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(12)]
+            Color(*CARD)
+            self._bg = RoundedRectangle(
+                pos=self.pos, size=self.size, radius=[dp(14)]
             )
-        self.bind(pos=self._update, size=self._update)
+            Color(*BORDER)
+            self._bd = Line(
+                rounded_rectangle=(
+                    self.x, self.y,
+                    self.width, self.height, dp(14)
+                ),
+                width=dp(0.8)
+            )
+        self.bind(pos=self._upd, size=self._upd)
 
-    def _update(self, *_):
-        self._rect.pos  = self.pos
-        self._rect.size = self.size
+    def _upd(self, *_):
+        self._bg.pos  = self.pos
+        self._bg.size = self.size
+        self._bd.rounded_rectangle = (
+            self.x, self.y, self.width, self.height, dp(14)
+        )
 
 
-class BuddyToggle(Widget):
-    def __init__(self, on_change=None, **kw):
+# ══════════════════════════════════════════════════════════════
+#  ANIMATED TOGGLE
+# ══════════════════════════════════════════════════════════════
+class Toggle(Widget):
+    W = dp(54)
+    H = dp(28)
+
+    def __init__(self, callback=None, **kw):
         super().__init__(
             size_hint=(None, None),
-            size=(dp(56), dp(28)),
-            **kw
+            size=(self.W, self.H), **kw
         )
-        self._state     = False
-        self._progress  = 0.0
-        self._on_change = on_change
+        self._on       = False
+        self._prog     = 0.0
+        self._callback = callback
+        self._anim     = None
         self._draw()
         self.bind(on_touch_up=self._touch)
 
+    # ── public ────────────────────────────────────────────────
+    def set_state(self, value, silent=False):
+        """Set toggle state; silent=True skips callback."""
+        if value == self._on:
+            return
+        self._on = value
+        if not silent and self._callback:
+            self._callback(value)
+        self._run_anim()
+
+    @property
+    def is_on(self):
+        return self._on
+
+    # ── internal ──────────────────────────────────────────────
     def _touch(self, _, touch):
         if self.collide_point(*touch.pos):
-            self.toggle()
+            self._on = not self._on
+            if self._callback:
+                self._callback(self._on)
+            self._run_anim()
 
-    def toggle(self):
-        self._state = not self._state
-        if self._on_change:
-            self._on_change(self._state)
-        target = 1.0 if self._state else 0.0
-        anim = Animation(_progress=target, duration=0.18)
-        anim.bind(on_progress=lambda *_: self._draw())
-        anim.bind(on_complete=lambda *_: self._draw())
-        anim.start(self)
-
-    def set(self, value):
-        if value != self._state:
-            self._state   = value
-            self._progress = 1.0 if value else 0.0
-            self._draw()
-
-    def get(self):
-        return self._state
+    def _run_anim(self):
+        if self._anim:
+            self._anim.cancel(self)
+        target = 1.0 if self._on else 0.0
+        self._anim = Animation(_prog=target, duration=0.18)
+        self._anim.bind(
+            on_progress=lambda *_: self._draw(),
+            on_complete=lambda *_: self._draw()
+        )
+        self._anim.start(self)
 
     def _draw(self, *_):
         self.canvas.clear()
-        t = self._progress
-        r = 0.18 + t * (0.42 - 0.18)
-        g = 0.18 + t * (0.39 - 0.18)
-        b = 0.25 + t * (1.00 - 0.25)
+        t  = self._prog
+        rr = 0.18 + t * (0.42 - 0.18)
+        gg = 0.18 + t * (0.38 - 0.18)
+        bb = 0.26 + t * (1.00 - 0.26)
         W, H = self.width, self.height
         with self.canvas:
-            Color(r, g, b, 1)
+            Color(rr, gg, bb, 1)
             RoundedRectangle(
-                pos=self.pos, size=(W, H), radius=[H / 2]
+                pos=self.pos,
+                size=(W, H),
+                radius=[H / 2]
             )
             pad    = dp(3)
             travel = W - H
-            cx = self.x + H / 2 + t * travel
-            cy = self.y + H / 2
-            R  = H / 2 - dp(3)
-            Color(0.93, 0.93, 0.96, 1)
-            Ellipse(pos=(cx - R, cy - R), size=(R * 2, R * 2))
+            cx     = self.x + H / 2 + t * travel
+            cy     = self.y + H / 2
+            R      = H / 2 - dp(3)
+            Color(0.95, 0.95, 0.97, 1)
+            Ellipse(
+                pos=(cx - R, cy - R),
+                size=(R * 2, R * 2)
+            )
 
 
-class BuddyToast(Popup):
-    def __init__(self, message, duration=2.5, **kw):
-        content = BoxLayout(
+# ══════════════════════════════════════════════════════════════
+#  TOAST  (floating popup)
+# ══════════════════════════════════════════════════════════════
+class Toast(Popup):
+    def __init__(self, msg, dur=2.5, **kw):
+        row = BoxLayout(
             orientation="horizontal",
             padding=[dp(14), dp(10)],
             spacing=dp(10)
         )
-        with content.canvas.before:
-            Color(*C_CARD)
-            self._bg = RoundedRectangle(radius=[dp(12)])
-        content.bind(
-            pos =lambda w, _: setattr(self._bg, "pos",  w.pos),
-            size=lambda w, _: setattr(self._bg, "size", w.size),
+        with row.canvas.before:
+            Color(*CARD)
+            self._bg = RoundedRectangle(radius=[dp(14)])
+        row.bind(
+            pos =lambda w, v: setattr(self._bg, "pos",  v),
+            size=lambda w, v: setattr(self._bg, "size", v)
         )
-        icon = Label(
-            text="🤖",
-            font_size=dp(24),
+        # robot emoji as text (always renders on Android)
+        row.add_widget(Label(
+            text="[b]:)[/b]",
+            markup=True,
+            font_size=dp(20),
+            color=ACCENT,
             size_hint=(None, 1),
-            width=dp(36)
-        )
-        msg = Label(
-            text=message,
+            width=dp(34)
+        ))
+        row.add_widget(Label(
+            text=msg,
             font_size=dp(14),
-            color=C_PRI,
+            color=PRI,
             bold=True,
-            text_size=(dp(190), None),
+            text_size=(dp(200), None),
             halign="left",
             valign="middle"
-        )
-        content.add_widget(icon)
-        content.add_widget(msg)
+        ))
         super().__init__(
             title="",
-            content=content,
+            content=row,
             size_hint=(None, None),
-            size=(dp(270), dp(76)),
+            size=(dp(260), dp(72)),
             separator_height=0,
             background="",
             background_color=(0, 0, 0, 0),
             **kw
         )
-        Clock.schedule_once(lambda dt: self.dismiss(), duration)
+        Clock.schedule_once(lambda dt: self.dismiss(), dur)
 
 
-class PulseWidget(Widget):
+# ══════════════════════════════════════════════════════════════
+#  PULSE MIC WIDGET
+# ══════════════════════════════════════════════════════════════
+class Pulse(Widget):
     def __init__(self, **kw):
         super().__init__(
             size_hint=(None, None),
-            size=(dp(100), dp(100)),
-            **kw
+            size=(dp(96), dp(96)), **kw
         )
         self._phase   = 0.0
         self._running = False
-        self._event   = None
-        self._draw_idle()
+        self._ev      = None
+        self._idle()
 
     def start(self):
+        if self._running:
+            return
         self._running = True
-        self._event = Clock.schedule_interval(self._animate, 1 / 20)
+        self._ev = Clock.schedule_interval(self._tick, 1 / 20)
 
     def stop(self):
         self._running = False
-        if self._event:
-            self._event.cancel()
-        self._draw_idle()
+        if self._ev:
+            self._ev.cancel()
+            self._ev = None
+        self._idle()
 
-    def _draw_idle(self):
+    def _idle(self):
         self.canvas.clear()
         cx, cy = self.center_x, self.center_y
-        R = dp(28)
+        R = dp(26)
         with self.canvas:
-            Color(*C_SURFACE)
+            Color(*SURF)
             Ellipse(pos=(cx - R, cy - R), size=(R * 2, R * 2))
-            Color(*C_ACCENT)
-            Line(circle=(cx, cy, R), width=dp(1.5))
-            Color(0.93, 0.93, 0.96, 1)
-            mw, mh = dp(9), dp(14)
+            Color(*ACCENT)
+            Line(circle=(cx, cy, R - dp(1)), width=dp(1.4))
+            # mic body (simple rectangle + stand lines)
+            Color(*PRI)
+            mw, mh = dp(8), dp(13)
             RoundedRectangle(
-                pos=(cx - mw/2, cy - dp(1)),
+                pos=(cx - mw / 2, cy),
                 size=(mw, mh),
                 radius=[mw / 2]
             )
+            # stand
+            Line(
+                points=[cx, cy - dp(1), cx, cy - dp(6)],
+                width=dp(1.1)
+            )
+            Line(
+                ellipse=(cx - dp(5), cy - dp(8),
+                         dp(10), dp(5), 0, 180),
+                width=dp(1.1)
+            )
 
-    def _animate(self, dt):
+    def _tick(self, dt):
         import math
         self.canvas.clear()
         cx, cy = self.center_x, self.center_y
         with self.canvas:
             for i in range(3, 0, -1):
-                r = dp(26 + i * 12)
-                alpha = 0.07 + 0.05 * math.sin(self._phase + i)
-                Color(0.42, 0.39, 1.0, alpha)
-                Ellipse(pos=(cx - r, cy - r), size=(r * 2, r * 2))
-            Color(*C_ACCENT)
-            R = dp(28)
+                r = dp(24 + i * 11)
+                a = 0.06 + 0.05 * math.sin(self._phase + i)
+                Color(0.42, 0.38, 1.0, a)
+                Ellipse(
+                    pos=(cx - r, cy - r),
+                    size=(r * 2, r * 2)
+                )
+            Color(*ACCENT)
+            R = dp(26)
             Ellipse(pos=(cx - R, cy - R), size=(R * 2, R * 2))
-            Color(0.93, 0.93, 0.96, 1)
-            mw, mh = dp(9), dp(14)
+            Color(*PRI)
+            mw, mh = dp(8), dp(13)
             RoundedRectangle(
-                pos=(cx - mw/2, cy - dp(1)),
+                pos=(cx - mw / 2, cy),
                 size=(mw, mh),
                 radius=[mw / 2]
             )
-        self._phase += 0.2
+            Line(
+                points=[cx, cy - dp(1), cx, cy - dp(6)],
+                width=dp(1.1)
+            )
+            Line(
+                ellipse=(cx - dp(5), cy - dp(8),
+                         dp(10), dp(5), 0, 180),
+                width=dp(1.1)
+            )
+        self._phase += 0.20
 
 
-class BuddyLayout(FloatLayout):
+# ══════════════════════════════════════════════════════════════
+#  MAIN LAYOUT
+# ══════════════════════════════════════════════════════════════
+class BuddyUI(FloatLayout):
+
     def __init__(self, **kw):
         super().__init__(**kw)
-        self._active       = False
-        self._awaiting_cmd = False
-        self._stop_event   = threading.Event()
+        self._active   = False
+        self._waiting  = False          # awaiting command after wake
+        self._stop_ev  = threading.Event()
         self._build()
 
+    # ── build UI ──────────────────────────────────────────────
     def _build(self):
-        scroll = ScrollView(
-            pos_hint={"x": 0, "y": 0},
+        sv = ScrollView(
             size_hint=(1, 1),
             do_scroll_x=False
         )
         root = BoxLayout(
             orientation="vertical",
-            padding=[dp(20), dp(14)],
+            padding=[dp(18), dp(10), dp(18), dp(20)],
             spacing=dp(12),
             size_hint_y=None
         )
         root.bind(minimum_height=root.setter("height"))
 
-        # Status bar
-        sb = BoxLayout(size_hint_y=None, height=dp(30))
-        sb.add_widget(Label(
-            text="9:41", font_size=dp(12), bold=True,
-            color=C_PRI, halign="left",
-            size_hint_x=None, width=dp(50)
+        # ── status bar ────────────────────────────────────────
+        bar = BoxLayout(size_hint_y=None, height=dp(28))
+        bar.add_widget(Label(
+            text="Buddy App",
+            font_size=dp(11), color=SEC,
+            halign="left"
         ))
-        sb.add_widget(Widget())
-        sb.add_widget(Label(
-            text="● ● ●", font_size=dp(9), color=C_SEC,
-            size_hint_x=None, width=dp(50), halign="right"
+        bar.add_widget(Label(
+            text="v1.0",
+            font_size=dp(11), color=DIM,
+            halign="right"
         ))
-        root.add_widget(sb)
+        root.add_widget(bar)
 
-        # Header
-        hdr = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(4))
+        # ── header ────────────────────────────────────────────
+        hdr = BoxLayout(
+            size_hint_y=None, height=dp(44),
+            spacing=dp(4)
+        )
         hdr.add_widget(Label(
-            text="[b]Buddy[/b]", markup=True,
-            font_size=dp(28), color=C_PRI,
-            halign="left", size_hint_x=None, width=dp(105)
+            text="[b]Buddy[/b]",
+            markup=True,
+            font_size=dp(28), color=PRI,
+            size_hint_x=None, width=dp(100),
+            halign="left"
         ))
         hdr.add_widget(Label(
-            text="Assistant", font_size=dp(28),
-            color=C_ACCENT, halign="left"
+            text="Assistant",
+            font_size=dp(28), color=ACCENT,
+            halign="left"
         ))
         root.add_widget(hdr)
 
         root.add_widget(Label(
             text="Your always-on voice companion",
-            font_size=dp(12), color=C_SEC,
-            size_hint_y=None, height=dp(22), halign="left"
+            font_size=dp(12), color=SEC,
+            size_hint_y=None, height=dp(20),
+            halign="left"
         ))
 
-        # Divider
-        div = Widget(size_hint_y=None, height=dp(1))
-        with div.canvas:
-            Color(*C_BORDER)
-            self._div_rect = Rectangle(pos=div.pos, size=div.size)
-        div.bind(
-            pos =lambda w, v: setattr(self._div_rect, "pos",  v),
-            size=lambda w, v: setattr(self._div_rect, "size", v)
+        # ── divider ───────────────────────────────────────────
+        d = Widget(size_hint_y=None, height=dp(1))
+        with d.canvas:
+            Color(*BORDER)
+            self._div = Rectangle(pos=d.pos, size=d.size)
+        d.bind(
+            pos =lambda w, v: setattr(self._div, "pos",  v),
+            size=lambda w, v: setattr(self._div, "size", v)
         )
-        root.add_widget(div)
+        root.add_widget(d)
 
-        # Status card
-        sc = Card(size_hint_y=None, height=dp(76))
-        st = BoxLayout(size_hint_y=None, height=dp(20))
-        st.add_widget(Label(
-            text="Status", font_size=dp(11),
-            color=C_SEC, halign="left"
+        # ── status card ───────────────────────────────────────
+        sc = Card(size_hint_y=None, height=dp(78))
+        srow = BoxLayout(size_hint_y=None, height=dp(22))
+        srow.add_widget(Label(
+            text="Status",
+            font_size=dp(11), color=SEC,
+            halign="left"
         ))
-        self._status_dot = Label(
-            text="●", font_size=dp(13), color=C_DIM,
-            halign="right", size_hint_x=None, width=dp(28)
+        self._dot = Label(
+            text="●", font_size=dp(14), color=DIM,
+            size_hint_x=None, width=dp(26),
+            halign="right"
         )
-        st.add_widget(self._status_dot)
-        self._status_lbl = Label(
-            text="Inactive", font_size=dp(20), bold=True,
-            color=C_DIM, halign="left",
+        srow.add_widget(self._dot)
+        self._stat = Label(
+            text="Inactive",
+            font_size=dp(19), bold=True, color=DIM,
+            halign="left",
             size_hint_y=None, height=dp(34)
         )
-        sc.add_widget(st)
-        sc.add_widget(self._status_lbl)
+        sc.add_widget(srow)
+        sc.add_widget(self._stat)
         root.add_widget(sc)
 
-        # Toggle card
-        tc = Card(size_hint_y=None, height=dp(136))
+        # ── toggle card ───────────────────────────────────────
+        tc = Card(size_hint_y=None, height=dp(144))
 
-        row_a = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        # Active row
+        ra = BoxLayout(
+            size_hint_y=None, height=dp(56),
+            spacing=dp(10)
+        )
         la = BoxLayout(orientation="vertical", spacing=dp(2))
         la.add_widget(Label(
-            text="⚡  Active", font_size=dp(14), bold=True,
-            color=C_PRI, halign="left"
+            text="Active  [Listen]",
+            font_size=dp(14), bold=True, color=PRI,
+            halign="left"
         ))
         la.add_widget(Label(
-            text="Listen in background",
-            font_size=dp(11), color=C_SEC, halign="left"
+            text="Tap to start background listener",
+            font_size=dp(10), color=SEC,
+            halign="left"
         ))
-        self._toggle_active = BuddyToggle(on_change=self._on_active)
-        row_a.add_widget(la)
-        row_a.add_widget(self._toggle_active)
-        tc.add_widget(row_a)
+        self._tog_active = Toggle(callback=self._on_active_tap)
+        ra.add_widget(la)
+        ra.add_widget(self._tog_active)
+        tc.add_widget(ra)
+
         tc.add_widget(Widget(size_hint_y=None, height=dp(6)))
 
-        row_i = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(8))
+        # Inactive row
+        ri = BoxLayout(
+            size_hint_y=None, height=dp(56),
+            spacing=dp(10)
+        )
         li = BoxLayout(orientation="vertical", spacing=dp(2))
         li.add_widget(Label(
-            text="🔇  Inactive", font_size=dp(14), bold=True,
-            color=C_PRI, halign="left"
+            text="Inactive  [Sleep]",
+            font_size=dp(14), bold=True, color=PRI,
+            halign="left"
         ))
         li.add_widget(Label(
-            text="Buddy sleeps silently",
-            font_size=dp(11), color=C_SEC, halign="left"
+            text="Buddy sleeps, no mic access",
+            font_size=dp(10), color=SEC,
+            halign="left"
         ))
-        self._toggle_inactive = BuddyToggle(on_change=self._on_inactive)
-        self._toggle_inactive.set(True)
-        row_i.add_widget(li)
-        row_i.add_widget(self._toggle_inactive)
-        tc.add_widget(row_i)
+        self._tog_inactive = Toggle(callback=self._on_inactive_tap)
+        self._tog_inactive.set_state(True, silent=True)
+        ri.add_widget(li)
+        ri.add_widget(self._tog_inactive)
+        tc.add_widget(ri)
         root.add_widget(tc)
 
-        # Mic pulse
-        mic_box = BoxLayout(
+        # ── pulse mic ─────────────────────────────────────────
+        mb = BoxLayout(
             orientation="vertical",
-            size_hint_y=None, height=dp(140), spacing=dp(6)
+            size_hint_y=None, height=dp(136),
+            spacing=dp(6)
         )
-        pulse_row = BoxLayout(size_hint_y=None, height=dp(106))
-        self._pulse = PulseWidget()
-        pulse_row.add_widget(Widget())
-        pulse_row.add_widget(self._pulse)
-        pulse_row.add_widget(Widget())
-        mic_box.add_widget(pulse_row)
-        mic_box.add_widget(Label(
-            text='Say  "Hello Buddy"  to wake up',
-            font_size=dp(11), color=C_DIM,
+        pr = BoxLayout(size_hint_y=None, height=dp(100))
+        self._pulse = Pulse()
+        pr.add_widget(Widget())
+        pr.add_widget(self._pulse)
+        pr.add_widget(Widget())
+        mb.add_widget(pr)
+        self._hint = Label(
+            text='Say "Hello Buddy" to wake up',
+            font_size=dp(11), color=DIM,
             size_hint_y=None, height=dp(22)
-        ))
-        root.add_widget(mic_box)
-
-        # Log card
-        lc = Card(size_hint_y=None, height=dp(150))
-        lc.add_widget(Label(
-            text="Activity Log", font_size=dp(11), color=C_SEC,
-            size_hint_y=None, height=dp(18), halign="left"
-        ))
-        self._log_lbl = Label(
-            text="App started. Toggle Active to begin.",
-            font_size=dp(11), color=C_SEC,
-            halign="left", valign="top",
-            text_size=(Window.width - dp(72), None)
         )
-        lc.add_widget(self._log_lbl)
+        mb.add_widget(self._hint)
+        root.add_widget(mb)
+
+        # ── log card ──────────────────────────────────────────
+        lc = Card(size_hint_y=None, height=dp(148))
+        lc.add_widget(Label(
+            text="Activity Log",
+            font_size=dp(11), color=SEC,
+            size_hint_y=None, height=dp(18),
+            halign="left"
+        ))
+        self._log = Label(
+            text="App ready. Toggle Active to start.",
+            font_size=dp(11), color=SEC,
+            halign="left", valign="top",
+            text_size=(Window.width - dp(56), None)
+        )
+        lc.add_widget(self._log)
         root.add_widget(lc)
 
-        # Quick test card
-        qc = Card(size_hint_y=None, height=dp(90))
+        # ── quick test card ───────────────────────────────────
+        qc = Card(size_hint_y=None, height=dp(110))
         qc.add_widget(Label(
-            text="Quick Test (no mic needed)",
-            font_size=dp(11), color=C_SEC,
-            size_hint_y=None, height=dp(18), halign="left"
+            text="Quick Test  (works without mic)",
+            font_size=dp(11), color=SEC,
+            size_hint_y=None, height=dp(18),
+            halign="left"
         ))
-        br = BoxLayout(spacing=dp(8), size_hint_y=None, height=dp(42))
+
         b1 = Button(
-            text="Hello Buddy", font_size=dp(12),
-            background_normal="", background_color=C_SURFACE,
-            color=C_ACCENT, bold=True
+            text='1. Say: "Hello Buddy"',
+            font_size=dp(12),
+            background_normal="",
+            background_color=SURF,
+            color=ACCENT,
+            bold=True,
+            size_hint_y=None,
+            height=dp(38)
         )
-        b1.bind(on_press=lambda _: self._process(WAKE_WORD))
+        b1.bind(on_release=lambda _: self._process(WAKE))
+
         b2 = Button(
-            text="Open WhatsApp", font_size=dp(12),
-            background_normal="", background_color=C_SURFACE,
-            color=C_ACCENT, bold=True
+            text='2. Say: "Open WhatsApp"',
+            font_size=dp(12),
+            background_normal="",
+            background_color=SURF,
+            color=ACCENT,
+            bold=True,
+            size_hint_y=None,
+            height=dp(38)
         )
-        b2.bind(on_press=lambda _: self._process(CMD_WA))
-        br.add_widget(b1)
-        br.add_widget(b2)
-        qc.add_widget(br)
+        b2.bind(on_release=lambda _: self._process(CMD_WA))
+
+        qc.add_widget(b1)
+        qc.add_widget(b2)
         root.add_widget(qc)
 
+        # ── how to use card ───────────────────────────────────
+        hc = Card(size_hint_y=None, height=dp(130))
+        hc.add_widget(Label(
+            text="How to use",
+            font_size=dp(11), color=SEC,
+            size_hint_y=None, height=dp(18),
+            halign="left"
+        ))
+        steps = [
+            "1. Toggle Active ON",
+            "2. Say  Hello Buddy",
+            "3. Wait for popup  Yes Buddy",
+            "4. Say  Open WhatsApp",
+        ]
+        for s in steps:
+            hc.add_widget(Label(
+                text=s,
+                font_size=dp(11), color=PRI,
+                size_hint_y=None, height=dp(20),
+                halign="left"
+            ))
+        root.add_widget(hc)
+
         root.add_widget(Label(
-            text="Buddy  •  v1.0",
-            font_size=dp(10), color=C_DIM,
+            text="Buddy Assistant  v1.0",
+            font_size=dp(10), color=DIM,
             size_hint_y=None, height=dp(28)
         ))
 
-        scroll.add_widget(root)
-        self.add_widget(scroll)
+        sv.add_widget(root)
+        self.add_widget(sv)
 
-    def _on_active(self, state):
+    # ══════════════════════════════════════════════════════════
+    #  TOGGLE CALLBACKS
+    # ══════════════════════════════════════════════════════════
+    def _on_active_tap(self, state):
         if state:
-            self._active = True
-            self._toggle_inactive.set(False)
-            self._status_dot.color = C_GREEN
-            self._status_lbl.color = C_GREEN
-            self._status_lbl.text  = "Active"
-            self._start_listener()
+            # turn inactive OFF silently
+            self._tog_inactive.set_state(False, silent=True)
+            self._activate()
         else:
-            self._active = False
-            self._toggle_inactive.set(True)
-            self._status_dot.color = C_DIM
-            self._status_lbl.color = C_DIM
-            self._status_lbl.text  = "Inactive"
-            self._stop_listener()
+            self._tog_inactive.set_state(True, silent=True)
+            self._deactivate()
 
-    def _on_inactive(self, state):
-        if state and self._toggle_active.get():
-            self._toggle_active.set(False)
-        elif not state and not self._toggle_active.get():
-            self._toggle_active.set(True)
+    def _on_inactive_tap(self, state):
+        if state:
+            self._tog_active.set_state(False, silent=True)
+            self._deactivate()
+        else:
+            self._tog_active.set_state(True, silent=True)
+            self._activate()
 
-    def _start_listener(self):
-        self._stop_event.clear()
-        threading.Thread(target=self._listen_loop, daemon=True).start()
+    def _activate(self):
+        self._active  = True
+        self._waiting = False
+        self._dot.color  = GREEN
+        self._stat.color = GREEN
+        self._stat.text  = "Active — Listening"
+        self._hint.text  = 'Say "Hello Buddy" to wake up'
         self._pulse.start()
-        self._log("Listening in background...")
+        self._stop_ev.clear()
+        t = threading.Thread(
+            target=self._listen_loop,
+            daemon=True
+        )
+        t.start()
+        self._write_log("Listener started")
 
-    def _stop_listener(self):
-        self._stop_event.set()
+    def _deactivate(self):
+        self._active  = False
+        self._waiting = False
+        self._stop_ev.set()
+        self._dot.color  = DIM
+        self._stat.color = DIM
+        self._stat.text  = "Inactive"
+        self._hint.text  = 'Toggle Active to begin'
         self._pulse.stop()
-        self._log("Listener stopped.")
+        self._write_log("Listener stopped")
 
+    # ══════════════════════════════════════════════════════════
+    #  VOICE LISTENER LOOP
+    # ══════════════════════════════════════════════════════════
     def _listen_loop(self):
-        if not SPEECH_OK:
-            Clock.schedule_once(lambda dt: self._log(
-                "speech_recognition not installed.\n"
-                "Use Quick Test buttons to demo."
+        if not SR_OK:
+            Clock.schedule_once(lambda dt: self._write_log(
+                "speech_recognition not installed\n"
+                "Use Quick Test buttons instead"
             ))
             return
-        recognizer = sr.Recognizer()
-        recognizer.dynamic_energy_threshold = True
-        while not self._stop_event.is_set():
+
+        rec = sr.Recognizer()
+        rec.dynamic_energy_threshold = True
+        rec.energy_threshold = 300
+        rec.pause_threshold  = 0.8
+
+        while not self._stop_ev.is_set():
             try:
-                with sr.Microphone() as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.4)
+                with sr.Microphone() as src:
+                    rec.adjust_for_ambient_noise(src, duration=0.5)
+                    Clock.schedule_once(
+                        lambda dt: self._write_log("Listening...")
+                    )
                     try:
-                        audio = recognizer.listen(
-                            source, timeout=6, phrase_time_limit=5
+                        audio = rec.listen(
+                            src,
+                            timeout=8,
+                            phrase_time_limit=6
                         )
                     except sr.WaitTimeoutError:
                         continue
-                if self._stop_event.is_set():
+
+                if self._stop_ev.is_set():
                     break
+
                 try:
-                    text = recognizer.recognize_google(audio).lower().strip()
+                    text = rec.recognize_google(audio).lower().strip()
                     Clock.schedule_once(
-                        lambda dt, t=text: self._process(t)
+                        lambda dt, t=text: self._on_heard(t)
                     )
                 except sr.UnknownValueError:
                     pass
                 except sr.RequestError as e:
                     Clock.schedule_once(
-                        lambda dt, e=e: self._log(f"SR error: {e}")
+                        lambda dt, e=e: self._write_log(
+                            f"Speech API error: {e}"
+                        )
                     )
-                    time.sleep(2)
+                    time.sleep(3)
+
+            except OSError as e:
+                Clock.schedule_once(
+                    lambda dt, e=e: self._write_log(
+                        f"Mic unavailable: {e}"
+                    )
+                )
+                time.sleep(4)
             except Exception as e:
                 Clock.schedule_once(
-                    lambda dt, e=e: self._log(f"Mic error: {e}")
+                    lambda dt, e=e: self._write_log(f"Error: {e}")
                 )
                 time.sleep(2)
 
+    # ══════════════════════════════════════════════════════════
+    #  COMMAND PROCESSOR
+    # ══════════════════════════════════════════════════════════
+    def _on_heard(self, text):
+        self._write_log(f'Heard: "{text}"')
+        self._process(text)
+
     def _process(self, text):
         text = text.lower().strip()
-        self._log(f"Heard: {text}")
-        if WAKE_WORD in text:
-            self._awaiting_cmd = True
-            self._show_toast("Yes Buddy! 👋")
-            speak_async("Yes Buddy")
+
+        if WAKE in text:
+            self._waiting = True
+            self._show_toast("Yes Buddy!")
+            self._write_log("Wake word detected - awaiting command")
+            self._hint.text = 'Now say "Open WhatsApp"'
             return
-        if self._awaiting_cmd:
+
+        if self._waiting:
             if CMD_WA in text:
-                self._awaiting_cmd = False
-                self._show_toast("Opening WhatsApp... 💬")
-                speak_async("Opening WhatsApp")
+                self._waiting = False
+                self._show_toast("Opening WhatsApp...")
+                self._write_log("Opening WhatsApp...")
+                self._hint.text = 'Say "Hello Buddy" to wake up'
                 threading.Thread(
-                    target=self._do_open_wa, daemon=True
+                    target=self._open_wa,
+                    daemon=True
                 ).start()
             else:
-                self._log(f"Unknown: {text}")
+                self._write_log(f'Unknown command: "{text}"')
+                self._hint.text = 'Say "Hello Buddy" to wake up'
+                self._waiting = False
 
-    def _do_open_wa(self):
-        ok = open_whatsapp()
+    def _open_wa(self):
+        ok = launch_whatsapp()
         Clock.schedule_once(
-            lambda dt: self._log(
-                "WhatsApp launched!" if ok
-                else "WhatsApp not found."
+            lambda dt: self._write_log(
+                "WhatsApp opened!" if ok
+                else "WhatsApp not found on device"
             )
         )
 
+    # ══════════════════════════════════════════════════════════
+    #  UI UTILITIES
+    # ══════════════════════════════════════════════════════════
     def _show_toast(self, msg):
-        BuddyToast(msg).open()
+        try:
+            Toast(msg).open()
+        except Exception as e:
+            self._write_log(f"Toast error: {e}")
 
-    def _log(self, msg):
+    def _write_log(self, msg):
         ts = time.strftime("%H:%M:%S")
-        self._log_lbl.text = f"[{ts}] {msg}"
+        self._log.text = f"[{ts}]  {msg}"
 
 
+# ══════════════════════════════════════════════════════════════
+#  APP ENTRY POINT
+# ══════════════════════════════════════════════════════════════
 class BuddyAssistantApp(App):
     def build(self):
         self.title = "Buddy Assistant"
         try:
-            return BuddyLayout()
+            return BuddyUI()
         except Exception as e:
-            from kivy.uix.label import Label
             return Label(
-                text=f"Error: {e}",
-                color=(1, 0, 0, 1)
+                text=f"Startup error:\n{e}",
+                color=(1, 0.3, 0.3, 1),
+                font_size=dp(13),
+                halign="center"
             )
+
+    def on_stop(self):
+        # clean up listener thread on exit
+        try:
+            self.root._stop_ev.set()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
     BuddyAssistantApp().run()
+ENDOFFILE
+python3 -c "
+import ast
+with open('/home/claude/main.py') as f:
+    src = f.read()
+ast.parse(src)
+print('Syntax OK -', len(src.splitlines()), 'lines')
+"a
