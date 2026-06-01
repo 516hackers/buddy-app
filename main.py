@@ -773,4 +773,4 @@ with open('/home/claude/main.py') as f:
     src = f.read()
 ast.parse(src)
 print('Syntax OK -', len(src.splitlines()), 'lines')
-"a
+"
