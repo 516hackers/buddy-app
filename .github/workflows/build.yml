@@ -16,7 +16,10 @@ jobs:
           docker run --rm \
             -v ${{ github.workspace }}:/home/user/hostcwd \
             ghcr.io/kivy/buildozer:latest \
-            android debug
+            sh -c "cd /home/user/hostcwd && \
+                   yes | sdkmanager --licenses && \
+                   sdkmanager 'build-tools;33.0.0' && \
+                   buildozer android debug"
 
       - name: Verify APK
         run: |
