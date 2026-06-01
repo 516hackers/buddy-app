@@ -8,10 +8,12 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# Both python3 and hostpython3 MUST be identical versions
-# hostpython3 is the Python compiled for the build host (used during cross-compilation)
-# python3 is the Python bundled into the APK
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,pyjnius,speech_recognition,requests,urllib3,certifi,charset_normalizer,idna
+# Rules for Android requirements:
+# - pyjnius, kivy, android → p4a has built-in recipes, DO NOT version-pin them
+# - speech_recognition has no recipe and no Android wheel → removed; use Android native STT via pyjnius
+# - python3/hostpython3 must be identical and pinned to avoid 3.14 pulling in
+# - pure-Python packages (requests etc.) are fine as-is
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,pyjnius,android,requests,urllib3,certifi,charset_normalizer,idna
 
 orientation = portrait
 fullscreen = 0
