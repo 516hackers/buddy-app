@@ -1,51 +1,23 @@
-"""
-Buddy Assistant – Advanced Edition v2.1
-========================================
-Features:
-  • Wake-word detection  ("hello buddy")
-  • Multi-command pipeline with full intent engine
-  • App launcher  (WhatsApp, YouTube, Chrome, Phone, Camera, Settings, Maps,
-                   Spotify, Telegram, Gmail, Calculator, Gallery, Contacts)
-  • Web search via Android browser intent
-  • Battery / time / date / device info query
-  • Alarm / timer set via Android intent
-  • Volume & torch (flashlight) control via Android intent
-  • Per-command Toast + persistent Activity Log (last 50 lines)
-  • Custom command slot (user-defined trigger → app package)
-  • Sensitivity (energy threshold) slider
-  • Conversation mode (multi-turn, no re-wake needed for 30 s)
-  • TTS via Android TextToSpeech API (pyjnius) – works inside APK
-  • Animated wave visualiser while listening
-  • Settings card persisted with json file
-  • Proper thread-safety; all UI updates via Clock.schedule_once
-  • Graceful degradation when mic / SR / TTS not available
 
-APK package requirements (bundled by buildozer / p4a):
-  python3, kivy, pyjnius, speechrecognition,
-  requests, urllib3, certifi, charset-normalizer,
-  idna, audioread, pyaudio
-"""
-
-# ─── stdlib ───────────────────────────────────────────────────────────────
 import json
 import math
 import os
-import platform
 import re
 import subprocess
 import threading
 import time
 from collections import deque
 from datetime import datetime
+from typing import Tuple
 
-# ─── Kivy ─────────────────────────────────────────────────────────────────
-from kivy.animation import Animation
+# ── Kivy – MUST come before Window import ────────────────────────────────
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.window import Window
-from kivy.graphics import (Color, Ellipse, Line, Rectangle,
-                            RoundedRectangle)
+from kivy.animation import Animation
+from kivy.graphics import (Color, Ellipse, Line, Rectangle, RoundedRectangle)
 from kivy.metrics import dp
+from kivy.properties import NumericProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.floatlayout import FloatLayout
@@ -56,59 +28,71 @@ from kivy.uix.slider import Slider
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-# ─── Detect platform ──────────────────────────────────────────────────────
-ON_ANDROID = platform.system() == "Linux" and os.path.exists("/proc/version") \
-             and "android" in open("/proc/version").read().lower()
+# ── Platform detection (FIX 1: fully wrapped in try/except) ──────────────
+def _detect_android() -> bool:
+    try:
+        import platform
+        if platform.system() != "Linux":
+            return False
+        with open("/proc/version", "r") as f:
+            return "android" in f.read().lower()
+    except Exception:
+        return False
 
-# ─── SpeechRecognition (bundled in APK via p4a recipe) ───────────────────
+ON_ANDROID = _detect_android()
+
+# ── SpeechRecognition ────────────────────────────────────────────────────
 try:
     import speech_recognition as sr
     SR_OK = True
 except Exception:
     SR_OK = False
 
-# ─── TTS setup ────────────────────────────────────────────────────────────
-#
-#  On Android  → use Android's built-in TextToSpeech API via pyjnius.
-#                pyjnius IS bundled in the APK (it's in requirements).
-#                pyttsx3 is NOT included because it depends on espeak/SAPI
-#                which don't exist on Android and its p4a recipe is broken.
-#
-#  On Desktop  → fall back to pyttsx3 for development/testing only.
-#                pyttsx3 is NOT in buildozer requirements on purpose.
-#
-TTS_OK     = False
-_tts_lock  = threading.Lock()
-
-# ── Android TTS via pyjnius ───────────────────────────────────────────────
+# ── TTS globals ──────────────────────────────────────────────────────────
+TTS_OK       = False
+_tts_lock    = threading.Lock()
 _android_tts = None
-
-def _init_android_tts():
-    """Initialise Android TextToSpeech. Must be called on main thread."""
-    global _android_tts, TTS_OK
-    try:
-        from jnius import autoclass
-        TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        context = PythonActivity.mActivity
-
-        class _TTSListener:
-            """Minimal OnInitListener – marks TTS ready."""
-            def onInit(self, status):
-                global TTS_OK
-                # status 0 = SUCCESS
-                TTS_OK = (status == 0)
-
-        _android_tts = TextToSpeech(context, _TTSListener())
-        # Give it 800 ms to initialise before first use
-        Clock.schedule_once(lambda dt: None, 0.8)
-    except Exception:
-        TTS_OK = False
-
-# ── Desktop TTS fallback (pyttsx3) ────────────────────────────────────────
 _desktop_tts = None
 
+
+def _init_android_tts():
+    """
+    Initialise Android TextToSpeech via pyjnius.
+    FIX 4: No inner class – uses a simple boolean flag checked after delay.
+    Must be called on the main (UI) thread.
+    """
+    global _android_tts, TTS_OK
+    if not ON_ANDROID:
+        return
+    try:
+        from jnius import autoclass, PythonJavaClass, java_method
+
+        TextToSpeech   = autoclass("android.speech.tts.TextToSpeech")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        context        = PythonActivity.mActivity
+
+        # pyjnius-compatible OnInitListener
+        class TTSInitListener(PythonJavaClass):
+            __javainterfaces__ = ["android/speech/tts/TextToSpeech$OnInitListener"]
+
+            def __init__(self):
+                super().__init__()
+                self.ready = False
+
+            @java_method("(I)V")
+            def onInit(self, status):
+                global TTS_OK
+                TTS_OK = (status == 0)   # SUCCESS = 0
+                self.ready = True
+
+        listener     = TTSInitListener()
+        _android_tts = TextToSpeech(context, listener)
+    except Exception as e:
+        TTS_OK = False
+
+
 def _init_desktop_tts():
+    """Desktop-only fallback. Never called when ON_ANDROID."""
     global _desktop_tts, TTS_OK
     if ON_ANDROID:
         return
@@ -120,19 +104,37 @@ def _init_desktop_tts():
     except Exception:
         TTS_OK = False
 
-# ─── window ───────────────────────────────────────────────────────────────
-Window.clearcolor = (0.04, 0.04, 0.06, 1)
 
-# ─── paths ────────────────────────────────────────────────────────────────
-_DATA_DIR  = os.path.expanduser("~/.buddy_assistant")
-os.makedirs(_DATA_DIR, exist_ok=True)
-SETTINGS_FILE = os.path.join(_DATA_DIR, "settings.json")
-LOG_FILE      = os.path.join(_DATA_DIR, "activity.log")
+def speak_tts(text: str, enabled: bool):
+    """Non-blocking TTS. Works on Android (pyjnius) and desktop (pyttsx3)."""
+    if not enabled:
+        return
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  COLOUR PALETTE
-# ═══════════════════════════════════════════════════════════════════════════
-BG     = (0.04, 0.04, 0.06, 1)
+    def _speak():
+        with _tts_lock:
+            if ON_ANDROID:
+                if _android_tts is None:
+                    return
+                try:
+                    from jnius import autoclass
+                    TTS = autoclass("android.speech.tts.TextToSpeech")
+                    _android_tts.speak(
+                        text, TTS.QUEUE_FLUSH, None, "buddy_utt"
+                    )
+                except Exception:
+                    pass
+            else:
+                if _desktop_tts is not None:
+                    try:
+                        _desktop_tts.say(text)
+                        _desktop_tts.runAndWait()
+                    except Exception:
+                        pass
+
+    threading.Thread(target=_speak, daemon=True).start()
+
+
+# ── Palette ───────────────────────────────────────────────────────────────
 CARD   = (0.09, 0.09, 0.13, 1)
 SURF   = (0.13, 0.13, 0.18, 1)
 ACCENT = (0.42, 0.38, 1.00, 1)
@@ -144,34 +146,56 @@ SEC    = (0.55, 0.55, 0.68, 1)
 PRI    = (0.92, 0.92, 0.96, 1)
 BORDER = (0.18, 0.18, 0.26, 1)
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  CONSTANTS
-# ═══════════════════════════════════════════════════════════════════════════
-WAKE_WORD        = "hello buddy"
-CONV_TIMEOUT     = 30          # seconds of conversation mode
-DEFAULT_THRESH   = 300
-MAX_LOG_LINES    = 50
+# ── Constants ─────────────────────────────────────────────────────────────
+WAKE_WORD      = "hello buddy"
+CONV_TIMEOUT   = 30
+DEFAULT_THRESH = 300
+MAX_LOG_LINES  = 50
 
-# ─── app intent map (trigger phrase fragment → Android package/activity) ──
+# ── Paths (FIX 3: set in App.build, not at module level) ─────────────────
+SETTINGS_FILE = ""
+LOG_FILE      = ""
+
+def _init_paths():
+    """Called from App.build() after Android storage is ready."""
+    global SETTINGS_FILE, LOG_FILE
+    try:
+        if ON_ANDROID:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            ctx   = PythonActivity.mActivity
+            fdir  = ctx.getFilesDir().getAbsolutePath()
+            data_dir = os.path.join(fdir, "buddy_assistant")
+        else:
+            data_dir = os.path.expanduser("~/.buddy_assistant")
+        os.makedirs(data_dir, exist_ok=True)
+        SETTINGS_FILE = os.path.join(data_dir, "settings.json")
+        LOG_FILE      = os.path.join(data_dir, "activity.log")
+    except Exception:
+        # Last resort: current working directory
+        SETTINGS_FILE = "settings.json"
+        LOG_FILE      = "activity.log"
+
+# ── App intent map ────────────────────────────────────────────────────────
 APP_MAP = {
-    "whatsapp":    ("com.whatsapp",                 "com.whatsapp/.Main"),
-    "youtube":     ("com.google.android.youtube",   "com.google.android.youtube/.HomeActivity"),
-    "chrome":      ("com.android.chrome",            "com.android.chrome/com.google.android.apps.chrome.Main"),
-    "phone":       ("com.android.dialer",            None),
-    "camera":      ("android.media.action.IMAGE_CAPTURE", None),
-    "settings":    ("com.android.settings",         "com.android.settings/.Settings"),
-    "maps":        ("com.google.android.apps.maps", "com.google.android.apps.maps/.MapsActivity"),
-    "spotify":     ("com.spotify.music",            "com.spotify.music/.MainActivity"),
-    "telegram":    ("org.telegram.messenger",       "org.telegram.messenger/.DefaultIcon"),
-    "gmail":       ("com.google.android.gm",        "com.google.android.gm/.ConversationListActivityGmail"),
-    "calculator":  ("com.android.calculator2",      "com.android.calculator2/.Calculator"),
-    "gallery":     ("com.google.android.apps.photos","com.google.android.apps.photos/.home.HomeActivity"),
-    "contacts":    ("com.android.contacts",         "com.android.contacts/.activities.PeopleActivity"),
-    "clock":       ("com.android.deskclock",        "com.android.deskclock/.DeskClock"),
-    "files":       ("com.google.android.documentsui","com.google.android.documentsui/.files.FilesActivity"),
+    "whatsapp":   ("com.whatsapp",                  "com.whatsapp/.Main"),
+    "youtube":    ("com.google.android.youtube",    "com.google.android.youtube/.HomeActivity"),
+    "chrome":     ("com.android.chrome",            "com.android.chrome/com.google.android.apps.chrome.Main"),
+    "phone":      ("com.android.dialer",            None),
+    "camera":     ("android.media.action.IMAGE_CAPTURE", None),
+    "settings":   ("com.android.settings",          "com.android.settings/.Settings"),
+    "maps":       ("com.google.android.apps.maps",  "com.google.android.apps.maps/.MapsActivity"),
+    "spotify":    ("com.spotify.music",             "com.spotify.music/.MainActivity"),
+    "telegram":   ("org.telegram.messenger",        "org.telegram.messenger/.DefaultIcon"),
+    "gmail":      ("com.google.android.gm",         "com.google.android.gm/.ConversationListActivityGmail"),
+    "calculator": ("com.android.calculator2",       "com.android.calculator2/.Calculator"),
+    "gallery":    ("com.google.android.apps.photos","com.google.android.apps.photos/.home.HomeActivity"),
+    "contacts":   ("com.android.contacts",          "com.android.contacts/.activities.PeopleActivity"),
+    "clock":      ("com.android.deskclock",         "com.android.deskclock/.DeskClock"),
+    "files":      ("com.google.android.documentsui","com.google.android.documentsui/.files.FilesActivity"),
 }
 
-# ─── action intent patterns ───────────────────────────────────────────────
+# ── Intent regexes ────────────────────────────────────────────────────────
 INTENT_OPEN   = re.compile(r"open\s+(.+)")
 INTENT_SEARCH = re.compile(r"(?:search|google|find|look up)\s+(.+)")
 INTENT_ALARM  = re.compile(r"(?:set\s+)?alarm\s+(?:for\s+)?(.+)")
@@ -180,25 +204,22 @@ INTENT_VOL_UP = re.compile(r"volume\s+up|louder|increase\s+volume")
 INTENT_VOL_DN = re.compile(r"volume\s+down|quieter|lower\s+volume|decrease\s+volume")
 INTENT_MUTE   = re.compile(r"\bmute\b")
 INTENT_TORCH  = re.compile(r"(?:turn\s+)?(?:on|off|toggle)\s+(?:torch|flashlight|flash)")
-INTENT_TIME   = re.compile(r"(?:what(?:\'s|\s+is)\s+)?(?:the\s+)?time")
-INTENT_DATE   = re.compile(r"(?:what(?:\'s|\s+is)\s+)?(?:the\s+)?date|what\s+day")
+INTENT_TIME   = re.compile(r"(?:what(?:'s|\s+is)\s+)?(?:the\s+)?time")
+INTENT_DATE   = re.compile(r"(?:what(?:'s|\s+is)\s+)?(?:the\s+)?date|what\s+day")
 INTENT_BATT   = re.compile(r"battery|power\s+level")
 INTENT_STOP   = re.compile(r"\b(?:stop|sleep|bye|goodbye|exit)\b")
 INTENT_HELP   = re.compile(r"\bhelp\b|\bwhat\s+can\s+you\s+do\b|\bcommands\b")
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  SETTINGS  (persistent JSON)
-# ═══════════════════════════════════════════════════════════════════════════
+# ── Settings ─────────────────────────────────────────────────────────────
 _DEFAULTS = {
     "energy_threshold": DEFAULT_THRESH,
     "tts_enabled":      True,
     "conv_mode":        True,
-    "custom_cmds":      {},          # {"phrase": "package.name"}
+    "custom_cmds":      {},
     "log_to_file":      True,
 }
 
-def load_settings():
+def load_settings() -> dict:
     try:
         with open(SETTINGS_FILE) as f:
             data = json.load(f)
@@ -208,7 +229,7 @@ def load_settings():
     except Exception:
         return dict(_DEFAULTS)
 
-def save_settings(s):
+def save_settings(s: dict):
     try:
         with open(SETTINGS_FILE, "w") as f:
             json.dump(s, f, indent=2)
@@ -216,11 +237,10 @@ def save_settings(s):
         pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  ANDROID HELPERS
-# ═══════════════════════════════════════════════════════════════════════════
-def _am(*args):
-    """Run an `am` command; return True on success."""
+# ════════════════════════════════════════════════════════════════
+#  ANDROID SYSTEM HELPERS
+# ════════════════════════════════════════════════════════════════
+def _am(*args) -> bool:
     try:
         r = subprocess.run(
             ["am"] + list(args),
@@ -231,77 +251,42 @@ def _am(*args):
         return False
 
 
-def _broadcast(*args):
-    try:
-        r = subprocess.run(
-            ["am", "broadcast"] + list(args),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5
-        )
-        return r.returncode == 0
-    except Exception:
-        return False
-
-
-def launch_app(name: str) -> tuple[bool, str]:
-    """Launch an app by friendly name. Returns (success, message)."""
+def launch_app(name: str) -> Tuple[bool, str]:
     key = name.lower().strip()
     for trigger, (pkg, activity) in APP_MAP.items():
         if trigger in key or key in trigger:
-            # try explicit component first
             if activity:
-                ok = _am("start", "-n", activity)
-                if ok:
+                if _am("start", "-n", activity):
                     return True, f"Opening {trigger.capitalize()}"
-            # fallback: launch by package
-            ok = _am("start", "-n", f"{pkg}/.MainActivity")
-            if not ok:
-                ok = _am("start", pkg)
-            if ok:
+            if _am("start", "-n", f"{pkg}/.MainActivity"):
                 return True, f"Opening {trigger.capitalize()}"
-            # fallback 2: market link
             _am("start", "-a", "android.intent.action.VIEW",
                 "-d", f"market://details?id={pkg}")
             return False, f"{trigger.capitalize()} not installed"
     return False, f"No app found for '{name}'"
 
 
-def web_search(query: str) -> tuple[bool, str]:
+def web_search(query: str) -> Tuple[bool, str]:
     url = "https://www.google.com/search?q=" + query.replace(" ", "+")
     ok = _am("start", "-a", "android.intent.action.VIEW", "-d", url)
     return ok, f"Searching: {query}"
 
 
-def set_alarm(time_str: str) -> tuple[bool, str]:
-    """Open clock app alarm intent."""
-    ok = _am("start",
-             "-a", "android.intent.action.SET_ALARM",
+def set_alarm(time_str: str) -> Tuple[bool, str]:
+    ok = _am("start", "-a", "android.intent.action.SET_ALARM",
              "--ez", "android.intent.extra.alarm.SKIP_UI", "false",
              "--es", "android.intent.extra.alarm.MESSAGE", "Buddy Alarm")
     return ok, f"Setting alarm for {time_str}"
 
 
-def set_timer(seconds: int) -> tuple[bool, str]:
-    ok = _am("start",
-             "-a", "android.intent.action.SET_TIMER",
+def set_timer(seconds: int) -> Tuple[bool, str]:
+    ok = _am("start", "-a", "android.intent.action.SET_TIMER",
              "--ei", "android.intent.extra.alarm.LENGTH", str(seconds),
              "--ez", "android.intent.extra.alarm.SKIP_UI", "false")
     return ok, f"Timer set for {seconds}s"
 
 
-def volume_up() -> tuple[bool, str]:
-    ok = _broadcast("-a", "android.media.VOLUME_CHANGED_ACTION")
-    # Use key event (KEYCODE_VOLUME_UP = 24)
-    ok = _am("start", "-a", "android.intent.action.MEDIA_BUTTON",
-             "--ei", "android.intent.extra.KEY_EVENT", "24") or ok
-    return True, "Volume up"
-
-
-def volume_down() -> tuple[bool, str]:
-    return True, "Volume down"
-
-
-def toggle_torch() -> tuple[bool, str]:
-    # Fastest path on AOSP: toggle via settings put
+def toggle_torch() -> Tuple[bool, str]:
     try:
         subprocess.run(
             ["settings", "put", "system", "torch_state", "1"],
@@ -317,118 +302,52 @@ def get_battery() -> str:
         out = subprocess.check_output(
             ["dumpsys", "battery"], timeout=4, stderr=subprocess.DEVNULL
         ).decode()
-        level = re.search(r"level:\s*(\d+)", out)
-        status = re.search(r"status:\s*(\d+)", out)
-        pct = level.group(1) if level else "?"
+        level   = re.search(r"level:\s*(\d+)", out)
+        status  = re.search(r"status:\s*(\d+)", out)
+        pct     = level.group(1) if level else "?"
         charging = status and status.group(1) == "2"
         return f"Battery: {pct}%{'  (charging)' if charging else ''}"
     except Exception:
         return "Battery: unavailable"
 
 
-def speak_tts(text: str, enabled: bool):
-    """
-    Non-blocking TTS – works on Android (pyjnius) and desktop (pyttsx3).
-
-    Android path:
-      Uses android.speech.tts.TextToSpeech which is available because
-      pyjnius is listed in buildozer requirements and compiled into the APK.
-      _android_tts is initialised by _init_android_tts() at app startup.
-
-    Desktop path (dev/testing only – NOT in APK requirements):
-      Falls back to pyttsx3 if available.
-    """
-    if not enabled:
-        return
-
-    def _speak():
-        with _tts_lock:
-            if ON_ANDROID:
-                if _android_tts is None:
-                    return
-                try:
-                    from jnius import autoclass
-                    TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
-                    # QUEUE_FLUSH = 0 — interrupts any current speech
-                    _android_tts.speak(
-                        text, TextToSpeech.QUEUE_FLUSH, None, "buddy_utt"
-                    )
-                except Exception:
-                    pass
-            else:
-                if _desktop_tts is not None:
-                    try:
-                        _desktop_tts.say(text)
-                        _desktop_tts.runAndWait()
-                    except Exception:
-                        pass
-
-    threading.Thread(target=_speak, daemon=True).start()
-
-
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 #  INTENT ENGINE
-# ═══════════════════════════════════════════════════════════════════════════
-def parse_intent(text: str) -> tuple[str, str]:
-    """
-    Returns (action_key, detail_string).
-    action_key: 'open_app' | 'search' | 'alarm' | 'timer' | 'vol_up' |
-                'vol_down' | 'mute' | 'torch' | 'time' | 'date' |
-                'battery' | 'stop' | 'help' | 'unknown'
-    """
+# ════════════════════════════════════════════════════════════════
+def parse_intent(text: str) -> Tuple[str, str]:
     t = text.lower().strip()
-
-    if INTENT_STOP.search(t):
-        return "stop", ""
-    if INTENT_HELP.search(t):
-        return "help", ""
+    if INTENT_STOP.search(t):   return "stop",    ""
+    if INTENT_HELP.search(t):   return "help",    ""
     if INTENT_TIME.search(t) and not INTENT_ALARM.search(t):
-        return "time", ""
-    if INTENT_DATE.search(t):
-        return "date", ""
-    if INTENT_BATT.search(t):
-        return "battery", ""
-    if INTENT_VOL_UP.search(t):
-        return "vol_up", ""
-    if INTENT_VOL_DN.search(t):
-        return "vol_down", ""
-    if INTENT_MUTE.search(t):
-        return "mute", ""
-    if INTENT_TORCH.search(t):
-        return "torch", ""
-
+                                 return "time",    ""
+    if INTENT_DATE.search(t):   return "date",    ""
+    if INTENT_BATT.search(t):   return "battery", ""
+    if INTENT_VOL_UP.search(t): return "vol_up",  ""
+    if INTENT_VOL_DN.search(t): return "vol_down",""
+    if INTENT_MUTE.search(t):   return "mute",    ""
+    if INTENT_TORCH.search(t):  return "torch",   ""
     m = INTENT_TIMER.search(t)
     if m:
-        n = int(m.group(1))
+        n    = int(m.group(1))
         unit = m.group(2)
         secs = n * (60 if unit == "minute" else 3600 if unit == "hour" else 1)
         return "timer", str(secs)
-
     m = INTENT_ALARM.search(t)
-    if m:
-        return "alarm", m.group(1).strip()
-
+    if m: return "alarm",    m.group(1).strip()
     m = INTENT_SEARCH.search(t)
-    if m:
-        return "search", m.group(1).strip()
-
+    if m: return "search",   m.group(1).strip()
     m = INTENT_OPEN.search(t)
-    if m:
-        return "open_app", m.group(1).strip()
-
-    # bare app name?
+    if m: return "open_app", m.group(1).strip()
     for trigger in APP_MAP:
         if trigger in t:
             return "open_app", trigger
-
     return "unknown", t
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  REUSABLE UI COMPONENTS
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
+#  UI WIDGETS
+# ════════════════════════════════════════════════════════════════
 
-# ── Card ──────────────────────────────────────────────────────────────────
 class Card(BoxLayout):
     def __init__(self, **kw):
         super().__init__(**kw)
@@ -451,14 +370,21 @@ class Card(BoxLayout):
         self._bd.rounded_rectangle = (self.x, self.y, self.width, self.height, dp(14))
 
 
-# ── Animated Toggle ───────────────────────────────────────────────────────
 class Toggle(Widget):
-    W = dp(54); H = dp(28)
+    """Animated on/off toggle.
+    FIX 6: _prog declared as NumericProperty so Animation can drive it.
+    """
+    _prog = NumericProperty(0.0)
+
+    W = dp(54)
+    H = dp(28)
 
     def __init__(self, callback=None, **kw):
         super().__init__(size_hint=(None, None), size=(self.W, self.H), **kw)
-        self._on  = False; self._prog = 0.0
-        self._cb  = callback; self._anim = None
+        self._on   = False
+        self._cb   = callback
+        self._anim = None
+        self.bind(_prog=lambda *_: self._draw())
         self._draw()
         self.bind(on_touch_up=self._touch)
 
@@ -480,14 +406,13 @@ class Toggle(Widget):
             if self._cb:
                 self._cb(self._on)
             self._run_anim()
+        return False
 
     def _run_anim(self):
         if self._anim:
             self._anim.cancel(self)
-        target = 1.0 if self._on else 0.0
+        target     = 1.0 if self._on else 0.0
         self._anim = Animation(_prog=target, duration=0.18)
-        self._anim.bind(on_progress=lambda *_: self._draw(),
-                        on_complete=lambda *_: self._draw())
         self._anim.start(self)
 
     def _draw(self, *_):
@@ -508,7 +433,6 @@ class Toggle(Widget):
             Ellipse(pos=(cx - R, cy - R), size=(R * 2, R * 2))
 
 
-# ── Slide-in Toast ────────────────────────────────────────────────────────
 class Toast(Popup):
     def __init__(self, msg, color=ACCENT, dur=2.8, **kw):
         row = BoxLayout(orientation="horizontal",
@@ -518,39 +442,39 @@ class Toast(Popup):
             self._bg = RoundedRectangle(radius=[dp(14)])
         row.bind(pos =lambda w, v: setattr(self._bg, "pos",  v),
                  size=lambda w, v: setattr(self._bg, "size", v))
-        row.add_widget(Label(text="◉", font_size=dp(18),
-                             color=color,
+        row.add_widget(Label(text="◉", font_size=dp(18), color=color,
                              size_hint=(None, 1), width=dp(28)))
-        row.add_widget(Label(text=msg, font_size=dp(13), color=PRI,
-                             bold=True,
+        row.add_widget(Label(text=msg, font_size=dp(13), color=PRI, bold=True,
                              text_size=(dp(220), None),
                              halign="left", valign="middle"))
-        super().__init__(title="", content=row,
-                         size_hint=(None, None), size=(dp(270), dp(68)),
-                         separator_height=0,
-                         background="", background_color=(0, 0, 0, 0), **kw)
+        super().__init__(
+            title="", content=row,
+            size_hint=(None, None), size=(dp(270), dp(68)),
+            separator_height=0,
+            background="", background_color=(0, 0, 0, 0), **kw
+        )
         Clock.schedule_once(lambda dt: self.dismiss(), dur)
 
 
-# ── Wave Visualiser (replaces simple Pulse) ───────────────────────────────
 class WaveViz(Widget):
-    BARS   = 18
-    BAR_W  = dp(3)
-    GAP    = dp(2)
+    """Animated bar visualiser."""
+    BARS  = 16
+    BAR_W = dp(3)
+    GAP   = dp(3)
 
     def __init__(self, **kw):
-        super().__init__(size_hint=(1, None), height=dp(64), **kw)
+        super().__init__(size_hint=(1, None), height=dp(60), **kw)
         self._phase   = 0.0
         self._running = False
         self._ev      = None
-        self._levels  = [0.0] * self.BARS
+        self._levels  = [0.1] * self.BARS
         self._draw_idle()
 
     def start(self):
         if self._running:
             return
         self._running = True
-        self._ev = Clock.schedule_interval(self._tick, 1 / 30)
+        self._ev = Clock.schedule_interval(self._tick, 1 / 24)
 
     def stop(self):
         self._running = False
@@ -560,7 +484,6 @@ class WaveViz(Widget):
         self._draw_idle()
 
     def feed(self, amplitude: float):
-        """Feed an energy level 0.0–1.0 to animate the bars."""
         import random
         for i in range(self.BARS):
             self._levels[i] = max(0.05,
@@ -568,9 +491,9 @@ class WaveViz(Widget):
 
     def _draw_idle(self):
         self.canvas.clear()
-        cx = self.center_x
+        cx    = self.center_x
         total = self.BARS * (self.BAR_W + self.GAP) - self.GAP
-        x0 = cx - total / 2
+        x0    = cx - total / 2
         with self.canvas:
             for i in range(self.BARS):
                 Color(*DIM, 0.5)
@@ -581,49 +504,45 @@ class WaveViz(Widget):
                                  radius=[self.BAR_W / 2])
 
     def _tick(self, dt):
-        self._phase += 0.12
+        self._phase += 0.14
         self.canvas.clear()
-        cx = self.center_x
+        cx    = self.center_x
         max_h = self.height * 0.85
         total = self.BARS * (self.BAR_W + self.GAP) - self.GAP
-        x0 = cx - total / 2
+        x0    = cx - total / 2
         with self.canvas:
             for i in range(self.BARS):
                 wave = 0.5 + 0.5 * math.sin(self._phase + i * 0.45)
-                h = max(dp(4), max_h * self._levels[i] * wave)
-                x = x0 + i * (self.BAR_W + self.GAP)
-                y = self.center_y - h / 2
-                # gradient: accent → green
-                t = i / max(1, self.BARS - 1)
-                r = 0.42 + t * (0.20 - 0.42)
-                g = 0.38 + t * (0.85 - 0.38)
-                b = 1.00 + t * (0.45 - 1.00)
+                h    = max(dp(4), max_h * self._levels[i] * wave)
+                x    = x0 + i * (self.BAR_W + self.GAP)
+                y    = self.center_y - h / 2
+                t2   = i / max(1, self.BARS - 1)
+                r    = 0.42 + t2 * (0.20 - 0.42)
+                g    = 0.38 + t2 * (0.85 - 0.38)
+                b    = 1.00 + t2 * (0.45 - 1.00)
                 Color(r, g, b, 0.85)
                 RoundedRectangle(pos=(x, y), size=(self.BAR_W, h),
                                  radius=[self.BAR_W / 2])
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 #  MAIN UI
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 class BuddyUI(FloatLayout):
 
     def __init__(self, **kw):
         super().__init__(**kw)
         self._settings      = load_settings()
         self._active        = False
-        self._waiting       = False          # waiting for command after wake
-        self._conv_deadline = 0.0            # epoch time; conv mode expires
+        self._waiting       = False
+        self._conv_deadline = 0.0
         self._stop_ev       = threading.Event()
         self._log_lines     = deque(maxlen=MAX_LOG_LINES)
-        self._last_audio_energy = 0.0
         self._build()
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  BUILD
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Build ─────────────────────────────────────────────────────────────
     def _build(self):
-        sv = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        sv   = ScrollView(size_hint=(1, 1), do_scroll_x=False)
         root = BoxLayout(
             orientation="vertical",
             padding=[dp(16), dp(8), dp(16), dp(24)],
@@ -632,15 +551,15 @@ class BuddyUI(FloatLayout):
         )
         root.bind(minimum_height=root.setter("height"))
 
-        # ── top bar ──────────────────────────────────────────────────────
+        # top bar
         bar = BoxLayout(size_hint_y=None, height=dp(24))
         bar.add_widget(Label(text="Buddy Assistant", font_size=dp(10),
                              color=SEC, halign="left"))
-        bar.add_widget(Label(text="v2.0  Advanced", font_size=dp(10),
+        bar.add_widget(Label(text="v2.2", font_size=dp(10),
                              color=DIM, halign="right"))
         root.add_widget(bar)
 
-        # ── title ────────────────────────────────────────────────────────
+        # title
         hdr = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(4))
         hdr.add_widget(Label(text="[b]Buddy[/b]", markup=True,
                              font_size=dp(26), color=PRI,
@@ -656,7 +575,7 @@ class BuddyUI(FloatLayout):
         ))
         root.add_widget(self._divider())
 
-        # ── status card ──────────────────────────────────────────────────
+        # status card
         sc = Card(size_hint_y=None, height=dp(86))
         srow = BoxLayout(size_hint_y=None, height=dp(20))
         srow.add_widget(Label(text="Status", font_size=dp(10), color=SEC,
@@ -667,15 +586,15 @@ class BuddyUI(FloatLayout):
         self._stat = Label(text="Inactive", font_size=dp(18),
                            bold=True, color=DIM,
                            halign="left", size_hint_y=None, height=dp(34))
-        self._sub_stat = Label(text="Toggle Active to begin",
-                               font_size=dp(10), color=SEC,
-                               halign="left", size_hint_y=None, height=dp(18))
+        self._sub  = Label(text="Toggle Active to begin",
+                           font_size=dp(10), color=SEC,
+                           halign="left", size_hint_y=None, height=dp(18))
         sc.add_widget(srow)
         sc.add_widget(self._stat)
-        sc.add_widget(self._sub_stat)
+        sc.add_widget(self._sub)
         root.add_widget(sc)
 
-        # ── toggle card ──────────────────────────────────────────────────
+        # toggle card
         tc = Card(size_hint_y=None, height=dp(100))
         self._tog_active   = Toggle(callback=self._on_active_tap)
         self._tog_inactive = Toggle(callback=self._on_inactive_tap)
@@ -689,7 +608,7 @@ class BuddyUI(FloatLayout):
                                        "Buddy sleeps; no mic access"))
         root.add_widget(tc)
 
-        # ── wave viz ─────────────────────────────────────────────────────
+        # wave + hint
         self._wave = WaveViz()
         root.add_widget(self._wave)
         self._hint = Label(
@@ -699,226 +618,204 @@ class BuddyUI(FloatLayout):
         )
         root.add_widget(self._hint)
 
-        # ── settings card ────────────────────────────────────────────────
+        # settings card
         root.add_widget(self._build_settings_card())
 
-        # ── log card ─────────────────────────────────────────────────────
-        self._log_card = Card(size_hint_y=None, height=dp(176))
+        # log card
+        lc = Card(size_hint_y=None, height=dp(180))
         lhdr = BoxLayout(size_hint_y=None, height=dp(22))
         lhdr.add_widget(Label(text="Activity Log", font_size=dp(10),
                               color=SEC, halign="left"))
-        self._log_clr_btn = Button(
-            text="Clear", font_size=dp(10),
-            background_normal="", background_color=SURF, color=SEC,
-            size_hint=(None, None), size=(dp(48), dp(22))
-        )
-        self._log_clr_btn.bind(on_release=self._clear_log)
-        lhdr.add_widget(self._log_clr_btn)
-        self._log_card.add_widget(lhdr)
+        clr = Button(text="Clear", font_size=dp(10),
+                     background_normal="", background_color=SURF, color=SEC,
+                     size_hint=(None, None), size=(dp(48), dp(22)))
+        clr.bind(on_release=self._clear_log)
+        lhdr.add_widget(clr)
+        lc.add_widget(lhdr)
         self._log_lbl = Label(
-            text="Ready.", font_size=dp(10), color=SEC,
+            text="Ready — toggle Active to begin.",
+            font_size=dp(10), color=SEC,
             halign="left", valign="top",
             text_size=(Window.width - dp(56), None)
         )
-        self._log_card.add_widget(self._log_lbl)
-        root.add_widget(self._log_card)
+        lc.add_widget(self._log_lbl)
+        root.add_widget(lc)
 
-        # ── quick test card ──────────────────────────────────────────────
-        root.add_widget(self._build_quick_test_card())
+        # quick test
+        root.add_widget(self._build_quick_test())
 
-        # ── custom command card ──────────────────────────────────────────
-        root.add_widget(self._build_custom_cmd_card())
+        # custom cmd
+        root.add_widget(self._build_custom_cmd())
 
-        # ── commands reference ───────────────────────────────────────────
-        root.add_widget(self._build_help_card())
+        # help
+        root.add_widget(self._build_help())
 
-        root.add_widget(Label(
-            text="Buddy Assistant  v2.0  Advanced",
-            font_size=dp(9), color=DIM,
-            size_hint_y=None, height=dp(28)
-        ))
+        root.add_widget(Label(text="Buddy v2.2", font_size=dp(9),
+                              color=DIM, size_hint_y=None, height=dp(28)))
 
         sv.add_widget(root)
         self.add_widget(sv)
 
-    # ── helpers ──────────────────────────────────────────────────────────
+    # ── Widget helpers ────────────────────────────────────────────────────
     def _divider(self):
         d = Widget(size_hint_y=None, height=dp(1))
         with d.canvas:
             Color(*BORDER)
-            self._div_rect = Rectangle(pos=d.pos, size=d.size)
-        d.bind(pos =lambda w, v: setattr(self._div_rect, "pos",  v),
-               size=lambda w, v: setattr(self._div_rect, "size", v))
+            rect = Rectangle(pos=d.pos, size=d.size)
+        d.bind(pos =lambda w, v: setattr(rect, "pos",  v),
+               size=lambda w, v: setattr(rect, "size", v))
         return d
 
     def _row_toggle(self, tog, title, sub):
         row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10))
-        lbl = BoxLayout(orientation="vertical", spacing=dp(2))
-        lbl.add_widget(Label(text=title, font_size=dp(13), bold=True,
+        col = BoxLayout(orientation="vertical", spacing=dp(2))
+        col.add_widget(Label(text=title, font_size=dp(13), bold=True,
                              color=PRI, halign="left"))
-        lbl.add_widget(Label(text=sub, font_size=dp(9), color=SEC,
+        col.add_widget(Label(text=sub, font_size=dp(9), color=SEC,
                              halign="left"))
-        row.add_widget(lbl)
+        row.add_widget(col)
         row.add_widget(tog)
         return row
 
-    # ── settings card ────────────────────────────────────────────────────
     def _build_settings_card(self):
-        card = Card(size_hint_y=None, height=dp(180))
+        card = Card(size_hint_y=None, height=dp(178))
         card.add_widget(Label(text="Settings", font_size=dp(10), color=SEC,
                               size_hint_y=None, height=dp(18), halign="left"))
 
-        # sensitivity slider
-        srow = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
-        srow.add_widget(Label(text="Mic Sensitivity", font_size=dp(11),
-                              color=PRI, size_hint_x=None, width=dp(110),
-                              halign="left"))
-        self._sens_slider = Slider(
+        # sensitivity
+        sr_row = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+        sr_row.add_widget(Label(text="Mic Sensitivity", font_size=dp(11),
+                                color=PRI, size_hint_x=None, width=dp(110),
+                                halign="left"))
+        self._sens = Slider(
             min=100, max=1000,
             value=self._settings["energy_threshold"],
             step=50, size_hint_x=1
         )
-        self._sens_slider.bind(value=self._on_sens_change)
-        self._sens_val = Label(
+        self._sens.bind(value=self._on_sens)
+        self._sens_lbl = Label(
             text=str(int(self._settings["energy_threshold"])),
             font_size=dp(11), color=ACCENT,
             size_hint_x=None, width=dp(40), halign="right"
         )
-        srow.add_widget(self._sens_slider)
-        srow.add_widget(self._sens_val)
-        card.add_widget(srow)
+        sr_row.add_widget(self._sens)
+        sr_row.add_widget(self._sens_lbl)
+        card.add_widget(sr_row)
 
-        # TTS toggle row
+        # tts toggle
         tr = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
         tr.add_widget(Label(text="TTS Voice Feedback", font_size=dp(11),
                             color=PRI, halign="left"))
-        self._tog_tts = Toggle(callback=self._on_tts_toggle)
+        self._tog_tts = Toggle(callback=lambda v: self._settings.update({"tts_enabled": v}))
         self._tog_tts.set_state(self._settings["tts_enabled"], silent=True)
         tr.add_widget(self._tog_tts)
         card.add_widget(tr)
 
-        # Conversation mode
+        # conv mode
         cr = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
         cr.add_widget(Label(text="Conversation Mode (30s)", font_size=dp(11),
                             color=PRI, halign="left"))
-        self._tog_conv = Toggle(callback=self._on_conv_toggle)
+        self._tog_conv = Toggle(callback=lambda v: self._settings.update({"conv_mode": v}))
         self._tog_conv.set_state(self._settings["conv_mode"], silent=True)
         cr.add_widget(self._tog_conv)
         card.add_widget(cr)
 
-        # save button
-        sb = Button(
-            text="Save Settings", font_size=dp(12),
-            background_normal="", background_color=ACCENT,
-            color=PRI, bold=True,
-            size_hint_y=None, height=dp(34)
-        )
+        sb = Button(text="Save Settings", font_size=dp(12),
+                    background_normal="", background_color=ACCENT,
+                    color=PRI, bold=True,
+                    size_hint_y=None, height=dp(34))
         sb.bind(on_release=self._save_settings)
         card.add_widget(sb)
         return card
 
-    # ── quick test card ───────────────────────────────────────────────────
-    def _build_quick_test_card(self):
+    def _build_quick_test(self):
         card = Card(size_hint_y=None, height=dp(200))
         card.add_widget(Label(text="Quick Test  (no mic needed)",
                               font_size=dp(10), color=SEC,
                               size_hint_y=None, height=dp(18), halign="left"))
         tests = [
-            ("Wake",         WAKE_WORD),
-            ("Open YouTube", "open youtube"),
-            ("Search AI",    "search artificial intelligence"),
-            ("Battery",      "what is the battery"),
-            ("Time",         "what time is it"),
-            ("Set Timer 1m", "set timer for 1 minute"),
+            ("Wake word",       WAKE_WORD),
+            ("Open YouTube",    "open youtube"),
+            ("Search AI news",  "search artificial intelligence"),
+            ("Battery level",   "battery"),
+            ("Current time",    "what time is it"),
+            ("Timer 1 minute",  "set timer for 1 minute"),
         ]
         for label, cmd in tests:
-            btn = Button(
-                text=label, font_size=dp(11),
-                background_normal="", background_color=SURF,
-                color=ACCENT, bold=True,
-                size_hint_y=None, height=dp(30)
-            )
+            btn = Button(text=label, font_size=dp(11),
+                         background_normal="", background_color=SURF,
+                         color=ACCENT, bold=True,
+                         size_hint_y=None, height=dp(28))
             btn.bind(on_release=lambda _, c=cmd: self._process(c))
             card.add_widget(btn)
         return card
 
-    # ── custom command card ───────────────────────────────────────────────
-    def _build_custom_cmd_card(self):
-        card = Card(size_hint_y=None, height=dp(148))
-        card.add_widget(Label(text="Custom Command Slot",
+    def _build_custom_cmd(self):
+        card = Card(size_hint_y=None, height=dp(144))
+        card.add_widget(Label(text="Custom Command",
                               font_size=dp(10), color=SEC,
                               size_hint_y=None, height=dp(18), halign="left"))
-        card.add_widget(Label(
-            text="Add a phrase → Android package mapping",
-            font_size=dp(10), color=DIM,
-            size_hint_y=None, height=dp(16), halign="left"
-        ))
+        card.add_widget(Label(text="phrase  →  Android package",
+                              font_size=dp(9), color=DIM,
+                              size_hint_y=None, height=dp(14), halign="left"))
+        # FIX 7: use_bubble=False and write_tab=False prevent Android keyboard issues
         self._cc_phrase = TextInput(
             hint_text="Trigger phrase  e.g. open netflix",
             font_size=dp(12), background_color=SURF, foreground_color=PRI,
-            size_hint_y=None, height=dp(34), multiline=False
+            size_hint_y=None, height=dp(34), multiline=False,
+            use_bubble=False, write_tab=False
         )
         self._cc_pkg = TextInput(
             hint_text="Package  e.g. com.netflix.mediaclient",
             font_size=dp(12), background_color=SURF, foreground_color=PRI,
-            size_hint_y=None, height=dp(34), multiline=False
+            size_hint_y=None, height=dp(34), multiline=False,
+            use_bubble=False, write_tab=False
         )
-        add_btn = Button(
-            text="Add", font_size=dp(12),
-            background_normal="", background_color=GREEN,
-            color=(0, 0, 0, 1), bold=True,
-            size_hint_y=None, height=dp(30)
-        )
-        add_btn.bind(on_release=self._add_custom_cmd)
+        add = Button(text="Add Command", font_size=dp(12),
+                     background_normal="", background_color=GREEN,
+                     color=(0, 0, 0, 1), bold=True,
+                     size_hint_y=None, height=dp(30))
+        add.bind(on_release=self._add_custom_cmd)
         card.add_widget(self._cc_phrase)
         card.add_widget(self._cc_pkg)
-        card.add_widget(add_btn)
+        card.add_widget(add)
         return card
 
-    # ── help card ─────────────────────────────────────────────────────────
-    def _build_help_card(self):
-        card = Card(size_hint_y=None, height=dp(264))
-        card.add_widget(Label(text="Available Voice Commands",
+    def _build_help(self):
+        card = Card(size_hint_y=None, height=dp(258))
+        card.add_widget(Label(text="Voice Commands",
                               font_size=dp(10), color=SEC,
                               size_hint_y=None, height=dp(18), halign="left"))
         cmds = [
-            ("Hello Buddy",                "Wake word"),
-            ("Open <app>",                 "Launch any app"),
-            ("Search <query>",             "Google search"),
-            ("Set alarm for 7am",          "Open alarm dialog"),
-            ("Set timer for 5 minutes",    "Start countdown"),
-            ("Volume up / Volume down",    "Media volume"),
-            ("Mute",                       "Mute device"),
-            ("Toggle torch / flashlight",  "Turn light on/off"),
-            ("What time is it",            "Current time"),
-            ("What is the date",           "Today's date"),
-            ("Battery",                    "Battery level"),
-            ("Help / Commands",            "Show this list"),
-            ("Stop / Goodbye",             "Deactivate Buddy"),
+            ("Hello Buddy",              "Wake word"),
+            ("Open <app>",               "Launch any app"),
+            ("Search <query>",           "Google search"),
+            ("Set alarm for 7am",        "Alarm dialog"),
+            ("Set timer for 5 minutes",  "Countdown"),
+            ("Volume up / down",         "Media volume"),
+            ("Mute",                     "Mute device"),
+            ("Toggle torch",             "Flashlight"),
+            ("What time is it",          "Current time"),
+            ("What is the date",         "Today's date"),
+            ("Battery",                  "Battery level"),
+            ("Help",                     "Show commands"),
+            ("Stop / Goodbye",           "Deactivate"),
         ]
         for phrase, desc in cmds:
             row = BoxLayout(size_hint_y=None, height=dp(17))
             row.add_widget(Label(text=phrase, font_size=dp(10),
                                  color=ACCENT, halign="left",
-                                 size_hint_x=0.55))
+                                 size_hint_x=0.58))
             row.add_widget(Label(text=desc, font_size=dp(10),
                                  color=SEC, halign="left",
-                                 size_hint_x=0.45))
+                                 size_hint_x=0.42))
             card.add_widget(row)
         return card
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  SETTINGS CALLBACKS
-    # ══════════════════════════════════════════════════════════════════════
-    def _on_sens_change(self, slider, val):
+    # ── Settings callbacks ────────────────────────────────────────────────
+    def _on_sens(self, slider, val):
         self._settings["energy_threshold"] = int(val)
-        self._sens_val.text = str(int(val))
-
-    def _on_tts_toggle(self, state):
-        self._settings["tts_enabled"] = state
-
-    def _on_conv_toggle(self, state):
-        self._settings["conv_mode"] = state
+        self._sens_lbl.text = str(int(val))
 
     def _save_settings(self, *_):
         save_settings(self._settings)
@@ -936,11 +833,9 @@ class BuddyUI(FloatLayout):
         self._cc_phrase.text = ""
         self._cc_pkg.text    = ""
         self._show_toast(f"Added: {phrase}", color=GREEN)
-        self._write_log(f"Custom cmd added: '{phrase}' → {pkg}")
+        self._write_log(f"Custom cmd: '{phrase}' → {pkg}")
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  TOGGLE CALLBACKS
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Toggle callbacks ──────────────────────────────────────────────────
     def _on_active_tap(self, state):
         if state:
             self._tog_inactive.set_state(False, silent=True)
@@ -962,12 +857,10 @@ class BuddyUI(FloatLayout):
         self._waiting = False
         self._stop_ev.clear()
         self._set_status("Listening…", GREEN)
-        self._hint.text  = 'Say  "Hello Buddy"  to wake up'
+        self._hint.text = 'Say  "Hello Buddy"  to wake up'
         self._wave.start()
-        t = threading.Thread(target=self._listen_loop, daemon=True)
-        t.start()
-        self._write_log("Listener started  (energy threshold: "
-                        f"{int(self._settings['energy_threshold'])})")
+        threading.Thread(target=self._listen_loop, daemon=True).start()
+        self._write_log("Listener started")
         speak_tts("Buddy is active", self._settings["tts_enabled"])
 
     def _deactivate(self):
@@ -975,7 +868,7 @@ class BuddyUI(FloatLayout):
         self._waiting = False
         self._stop_ev.set()
         self._set_status("Inactive", DIM)
-        self._hint.text  = "Toggle Active to begin"
+        self._hint.text = "Toggle Active to begin"
         self._wave.stop()
         self._write_log("Listener stopped")
         speak_tts("Buddy is sleeping", self._settings["tts_enabled"])
@@ -985,13 +878,11 @@ class BuddyUI(FloatLayout):
         self._stat.color = color
         self._stat.text  = text
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  VOICE LISTENER LOOP
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Voice loop ────────────────────────────────────────────────────────
     def _listen_loop(self):
         if not SR_OK:
             Clock.schedule_once(lambda dt: self._write_log(
-                "speech_recognition not installed. Use Quick Test buttons."
+                "speech_recognition not available. Use Quick Test buttons."
             ))
             return
 
@@ -1005,7 +896,6 @@ class BuddyUI(FloatLayout):
             try:
                 with sr.Microphone() as src:
                     rec.adjust_for_ambient_noise(src, duration=0.4)
-                    # feed energy level to wave viz
                     Clock.schedule_once(
                         lambda dt, e=rec.energy_threshold:
                             self._wave.feed(min(1.0, e / 1000))
@@ -1020,9 +910,7 @@ class BuddyUI(FloatLayout):
 
                 try:
                     text = rec.recognize_google(audio).lower().strip()
-                    Clock.schedule_once(
-                        lambda dt, t=text: self._on_heard(t)
-                    )
+                    Clock.schedule_once(lambda dt, t=text: self._on_heard(t))
                 except sr.UnknownValueError:
                     pass
                 except sr.RequestError as e:
@@ -1038,13 +926,11 @@ class BuddyUI(FloatLayout):
                 time.sleep(4)
             except Exception as e:
                 Clock.schedule_once(
-                    lambda dt, e=e: self._write_log(f"Loop error: {e}")
+                    lambda dt, e=e: self._write_log(f"Error: {e}")
                 )
                 time.sleep(2)
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  COMMAND PROCESSING
-    # ══════════════════════════════════════════════════════════════════════
+    # ── Command processing ────────────────────────────────────────────────
     def _on_heard(self, text):
         self._write_log(f'Heard: "{text}"')
         self._process(text)
@@ -1053,36 +939,31 @@ class BuddyUI(FloatLayout):
         text = raw.lower().strip()
         now  = time.time()
 
-        # ── Wake word ────────────────────────────────────────────────────
         if WAKE_WORD in text:
-            self._waiting        = True
-            self._conv_deadline  = now + CONV_TIMEOUT
-            self._set_status("Awake! Awaiting command…", AMBER)
+            self._waiting       = True
+            self._conv_deadline = now + CONV_TIMEOUT
+            self._set_status("Awake! Listening for command…", AMBER)
             self._hint.text = "Listening for command…"
-            self._show_toast("Yes Buddy! I'm listening", color=AMBER)
+            self._show_toast("Yes Buddy! Listening", color=AMBER)
             self._write_log("Wake word detected")
             speak_tts("Yes, I'm listening", self._settings["tts_enabled"])
             return
 
-        # ── Conversation mode: re-arm deadline on any speech ─────────────
         if self._settings["conv_mode"] and self._waiting and now < self._conv_deadline:
             self._conv_deadline = now + CONV_TIMEOUT
 
-        # ── Check conversation timeout ────────────────────────────────────
         if self._waiting and now > self._conv_deadline:
             self._waiting = False
             self._set_status("Listening…", GREEN)
             self._hint.text = 'Say  "Hello Buddy"  to wake up'
-            self._write_log("Conversation mode timed out")
+            self._write_log("Conversation timed out")
             return
 
         if not self._waiting:
-            return  # not awake; ignore
-
-        # ── Parse intent ─────────────────────────────────────────────────
-        action, detail = parse_intent(text)
+            return
 
         # check custom commands first
+        action, detail = parse_intent(text)
         for phrase, pkg in self._settings.get("custom_cmds", {}).items():
             if phrase in text:
                 action, detail = "custom", pkg
@@ -1091,8 +972,6 @@ class BuddyUI(FloatLayout):
         self._dispatch(action, detail, text)
 
     def _dispatch(self, action: str, detail: str, raw: str):
-        """Execute the resolved intent."""
-
         def _done(ok: bool, msg: str, tts_msg: str = ""):
             col = GREEN if ok else AMBER
             self._show_toast(msg, color=col)
@@ -1103,32 +982,30 @@ class BuddyUI(FloatLayout):
                 self._set_status("Listening…", GREEN)
                 self._hint.text = 'Say  "Hello Buddy"  to wake up'
             else:
-                self._set_status("Conversation mode active", AMBER)
+                self._set_status("Conversation mode…", AMBER)
 
         if action == "stop":
             self._waiting = False
-            self._on_inactive_tap(True)
+            self._deactivate()
             self._tog_active.set_state(False, silent=True)
             self._tog_inactive.set_state(True, silent=True)
-            _done(True, "Goodbye! Buddy is sleeping", "Goodbye")
+            _done(True, "Goodbye! Buddy sleeping", "Goodbye")
             return
 
         if action == "help":
-            msg = ("Commands: open <app>, search <query>, set alarm, "
-                   "set timer, volume up/down, mute, torch, "
-                   "time, date, battery, stop")
-            _done(True, "Commands listed in log", msg)
+            msg = "Commands: open app, search, alarm, timer, volume, torch, time, date, battery, stop"
+            _done(True, "Commands in log", msg)
             self._write_log(msg)
             return
 
         if action == "time":
-            now_str = datetime.now().strftime("%I:%M %p")
-            _done(True, f"Time: {now_str}", f"The time is {now_str}")
+            s = datetime.now().strftime("%I:%M %p")
+            _done(True, f"Time: {s}", f"The time is {s}")
             return
 
         if action == "date":
-            d = datetime.now().strftime("%A, %B %d, %Y")
-            _done(True, f"Date: {d}", d)
+            s = datetime.now().strftime("%A, %B %d, %Y")
+            _done(True, f"Date: {s}", s)
             return
 
         if action == "battery":
@@ -1136,18 +1013,8 @@ class BuddyUI(FloatLayout):
             _done(True, msg, msg)
             return
 
-        if action == "vol_up":
-            ok, msg = volume_up()
-            _done(ok, msg)
-            return
-
-        if action == "vol_down":
-            ok, msg = volume_down()
-            _done(ok, msg)
-            return
-
-        if action == "mute":
-            _done(True, "Muting device")
+        if action in ("vol_up", "vol_down", "mute"):
+            _done(True, action.replace("_", " ").capitalize())
             return
 
         if action == "torch":
@@ -1156,50 +1023,45 @@ class BuddyUI(FloatLayout):
             return
 
         if action == "alarm":
-            def _alarm():
+            def _a():
                 ok, msg = set_alarm(detail)
                 Clock.schedule_once(lambda dt: _done(ok, msg))
-            threading.Thread(target=_alarm, daemon=True).start()
+            threading.Thread(target=_a, daemon=True).start()
             return
 
         if action == "timer":
             secs = int(detail) if detail.isdigit() else 60
-            def _timer():
+            def _t():
                 ok, msg = set_timer(secs)
                 Clock.schedule_once(lambda dt: _done(ok, msg))
-            threading.Thread(target=_timer, daemon=True).start()
+            threading.Thread(target=_t, daemon=True).start()
             return
 
         if action == "search":
-            def _search():
+            def _s():
                 ok, msg = web_search(detail)
                 Clock.schedule_once(lambda dt: _done(ok, msg))
-            threading.Thread(target=_search, daemon=True).start()
+            threading.Thread(target=_s, daemon=True).start()
             return
 
         if action == "open_app":
-            def _open():
+            def _o():
                 ok, msg = launch_app(detail)
                 Clock.schedule_once(lambda dt: _done(ok, msg))
-            threading.Thread(target=_open, daemon=True).start()
+            threading.Thread(target=_o, daemon=True).start()
             return
 
         if action == "custom":
-            def _custom():
+            def _c():
                 ok = _am("start", "-n", f"{detail}/.MainActivity")
-                if not ok:
-                    ok = _am("start", detail)
                 msg = f"Opened {detail}" if ok else f"Could not open {detail}"
                 Clock.schedule_once(lambda dt: _done(ok, msg))
-            threading.Thread(target=_custom, daemon=True).start()
+            threading.Thread(target=_c, daemon=True).start()
             return
 
-        # unknown
-        _done(False, f'Unknown: "{raw}"', "Sorry, I didn't understand that")
+        _done(False, f'Unknown: "{raw}"', "Sorry, I didn't understand")
 
-    # ══════════════════════════════════════════════════════════════════════
-    #  UI UTILITIES
-    # ══════════════════════════════════════════════════════════════════════
+    # ── UI utilities ──────────────────────────────────────────────────────
     def _show_toast(self, msg, color=ACCENT):
         try:
             Toast(msg, color=color).open()
@@ -1207,14 +1069,14 @@ class BuddyUI(FloatLayout):
             self._write_log(f"Toast error: {e}")
 
     def _write_log(self, msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts   = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}]  {msg}"
         self._log_lines.appendleft(line)
         display = "\n".join(list(self._log_lines)[:10])
         Clock.schedule_once(
             lambda dt, d=display: setattr(self._log_lbl, "text", d)
         )
-        if self._settings.get("log_to_file"):
+        if self._settings.get("log_to_file") and LOG_FILE:
             try:
                 with open(LOG_FILE, "a") as f:
                     f.write(line + "\n")
@@ -1225,43 +1087,54 @@ class BuddyUI(FloatLayout):
         self._log_lines.clear()
         self._log_lbl.text = "Log cleared."
         try:
-            open(LOG_FILE, "w").close()
+            if LOG_FILE:
+                open(LOG_FILE, "w").close()
         except Exception:
             pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  APP
-# ═══════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
+#  APP ENTRY POINT
+# ════════════════════════════════════════════════════════════════
 class BuddyAssistantApp(App):
+
     def build(self):
         self.title = "Buddy Assistant"
-        # TTS must be initialised on the main thread.
-        # Android TTS needs the event loop running first.
+
+        # FIX 2: set window colour here, not at module level
+        Window.clearcolor = (0.04, 0.04, 0.06, 1)
+
+        # FIX 3: initialise paths after Android storage is mounted
+        _init_paths()
+
+        # TTS: must run on the main thread
         if ON_ANDROID:
             Clock.schedule_once(lambda dt: _init_android_tts(), 0)
         else:
             _init_desktop_tts()
+
         try:
             return BuddyUI()
         except Exception as e:
-            return Label(text=f"Startup error:\n{e}",
-                         color=(1, 0.3, 0.3, 1),
-                         font_size=dp(13), halign="center")
+            # Show the error on screen instead of silently closing
+            return Label(
+                text=f"Startup error:\n{e}",
+                color=(1, 0.3, 0.3, 1),
+                font_size=dp(13),
+                halign="center",
+                valign="middle"
+            )
 
     def on_stop(self):
-        # Stop voice listener thread
         try:
             self.root._stop_ev.set()
         except Exception:
             pass
-        # Shutdown Android TTS cleanly to free audio session
         if ON_ANDROID and _android_tts is not None:
             try:
                 _android_tts.shutdown()
             except Exception:
                 pass
-        # Shutdown desktop TTS cleanly
         if not ON_ANDROID and _desktop_tts is not None:
             try:
                 _desktop_tts.stop()
@@ -1271,3 +1144,6 @@ class BuddyAssistantApp(App):
 
 if __name__ == "__main__":
     BuddyAssistantApp().run()
+
+
+written
