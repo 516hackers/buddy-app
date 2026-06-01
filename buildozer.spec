@@ -8,9 +8,6 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# Using Kivy 2.2.1 - more stable for Android builds than 2.3.0
-# python3 and hostpython3 must be identical
-# pyjnius and android have p4a recipes — never version-pin them
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.2.1,pyjnius,android,requests,urllib3,certifi,charset_normalizer,idna
 
 orientation = portrait
@@ -26,7 +23,6 @@ android.archs = arm64-v8a,armeabi-v7a
 
 android.allow_backup = True
 
-# Hook to pin pip inside p4a venvs before package installation
 p4a.hook = buildozer/p4a_hook.py
 
 [buildozer]
