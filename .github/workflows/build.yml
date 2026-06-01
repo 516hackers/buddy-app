@@ -32,7 +32,7 @@ jobs:
             zip unzip build-essential git \
             libffi-dev libssl-dev autoconf \
             libtool pkg-config cmake \
-            libltdl-dev libgstreamer1.0-dev \
+            libltdl-dev \
             zlib1g-dev libncurses5-dev \
             libncursesw5-dev libreadline-dev \
             libsqlite3-dev libgdbm-dev \
