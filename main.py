@@ -1,9 +1,9 @@
 """
-Buddy Assistant – Advanced Edition
-===================================
+Buddy Assistant – Advanced Edition v2.1
+========================================
 Features:
   • Wake-word detection  ("hello buddy")
-  • Multi-command pipeline with intent engine
+  • Multi-command pipeline with full intent engine
   • App launcher  (WhatsApp, YouTube, Chrome, Phone, Camera, Settings, Maps,
                    Spotify, Telegram, Gmail, Calculator, Gallery, Contacts)
   • Web search via Android browser intent
@@ -14,18 +14,23 @@ Features:
   • Custom command slot (user-defined trigger → app package)
   • Sensitivity (energy threshold) slider
   • Conversation mode (multi-turn, no re-wake needed for 30 s)
-  • TTS feedback via Android's built-in TTS (pyttsx3 fallback)
+  • TTS via Android TextToSpeech API (pyjnius) – works inside APK
   • Animated wave visualiser while listening
   • Settings card persisted with json file
   • Proper thread-safety; all UI updates via Clock.schedule_once
-  • Graceful degradation when mic / SR not available
-  • Animated toggle, pulse rings, slide-in toast
+  • Graceful degradation when mic / SR / TTS not available
+
+APK package requirements (bundled by buildozer / p4a):
+  python3, kivy, pyjnius, speechrecognition,
+  requests, urllib3, certifi, charset-normalizer,
+  idna, audioread, pyaudio
 """
 
 # ─── stdlib ───────────────────────────────────────────────────────────────
 import json
 import math
 import os
+import platform
 import re
 import subprocess
 import threading
@@ -51,20 +56,69 @@ from kivy.uix.slider import Slider
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
 
-# ─── optional deps ────────────────────────────────────────────────────────
+# ─── Detect platform ──────────────────────────────────────────────────────
+ON_ANDROID = platform.system() == "Linux" and os.path.exists("/proc/version") \
+             and "android" in open("/proc/version").read().lower()
+
+# ─── SpeechRecognition (bundled in APK via p4a recipe) ───────────────────
 try:
     import speech_recognition as sr
     SR_OK = True
 except Exception:
     SR_OK = False
 
-try:
-    import pyttsx3
-    _tts_engine = pyttsx3.init()
-    _tts_engine.setProperty("rate", 165)
-    TTS_OK = True
-except Exception:
-    TTS_OK = False
+# ─── TTS setup ────────────────────────────────────────────────────────────
+#
+#  On Android  → use Android's built-in TextToSpeech API via pyjnius.
+#                pyjnius IS bundled in the APK (it's in requirements).
+#                pyttsx3 is NOT included because it depends on espeak/SAPI
+#                which don't exist on Android and its p4a recipe is broken.
+#
+#  On Desktop  → fall back to pyttsx3 for development/testing only.
+#                pyttsx3 is NOT in buildozer requirements on purpose.
+#
+TTS_OK     = False
+_tts_lock  = threading.Lock()
+
+# ── Android TTS via pyjnius ───────────────────────────────────────────────
+_android_tts = None
+
+def _init_android_tts():
+    """Initialise Android TextToSpeech. Must be called on main thread."""
+    global _android_tts, TTS_OK
+    try:
+        from jnius import autoclass
+        TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        context = PythonActivity.mActivity
+
+        class _TTSListener:
+            """Minimal OnInitListener – marks TTS ready."""
+            def onInit(self, status):
+                global TTS_OK
+                # status 0 = SUCCESS
+                TTS_OK = (status == 0)
+
+        _android_tts = TextToSpeech(context, _TTSListener())
+        # Give it 800 ms to initialise before first use
+        Clock.schedule_once(lambda dt: None, 0.8)
+    except Exception:
+        TTS_OK = False
+
+# ── Desktop TTS fallback (pyttsx3) ────────────────────────────────────────
+_desktop_tts = None
+
+def _init_desktop_tts():
+    global _desktop_tts, TTS_OK
+    if ON_ANDROID:
+        return
+    try:
+        import pyttsx3
+        _desktop_tts = pyttsx3.init()
+        _desktop_tts.setProperty("rate", 165)
+        TTS_OK = True
+    except Exception:
+        TTS_OK = False
 
 # ─── window ───────────────────────────────────────────────────────────────
 Window.clearcolor = (0.04, 0.04, 0.06, 1)
@@ -273,15 +327,42 @@ def get_battery() -> str:
 
 
 def speak_tts(text: str, enabled: bool):
-    """Non-blocking TTS."""
-    if not enabled or not TTS_OK:
+    """
+    Non-blocking TTS – works on Android (pyjnius) and desktop (pyttsx3).
+
+    Android path:
+      Uses android.speech.tts.TextToSpeech which is available because
+      pyjnius is listed in buildozer requirements and compiled into the APK.
+      _android_tts is initialised by _init_android_tts() at app startup.
+
+    Desktop path (dev/testing only – NOT in APK requirements):
+      Falls back to pyttsx3 if available.
+    """
+    if not enabled:
         return
+
     def _speak():
-        try:
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
-        except Exception:
-            pass
+        with _tts_lock:
+            if ON_ANDROID:
+                if _android_tts is None:
+                    return
+                try:
+                    from jnius import autoclass
+                    TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+                    # QUEUE_FLUSH = 0 — interrupts any current speech
+                    _android_tts.speak(
+                        text, TextToSpeech.QUEUE_FLUSH, None, "buddy_utt"
+                    )
+                except Exception:
+                    pass
+            else:
+                if _desktop_tts is not None:
+                    try:
+                        _desktop_tts.say(text)
+                        _desktop_tts.runAndWait()
+                    except Exception:
+                        pass
+
     threading.Thread(target=_speak, daemon=True).start()
 
 
@@ -1155,6 +1236,12 @@ class BuddyUI(FloatLayout):
 class BuddyAssistantApp(App):
     def build(self):
         self.title = "Buddy Assistant"
+        # TTS must be initialised on the main thread.
+        # Android TTS needs the event loop running first.
+        if ON_ANDROID:
+            Clock.schedule_once(lambda dt: _init_android_tts(), 0)
+        else:
+            _init_desktop_tts()
         try:
             return BuddyUI()
         except Exception as e:
@@ -1163,10 +1250,23 @@ class BuddyAssistantApp(App):
                          font_size=dp(13), halign="center")
 
     def on_stop(self):
+        # Stop voice listener thread
         try:
             self.root._stop_ev.set()
         except Exception:
             pass
+        # Shutdown Android TTS cleanly to free audio session
+        if ON_ANDROID and _android_tts is not None:
+            try:
+                _android_tts.shutdown()
+            except Exception:
+                pass
+        # Shutdown desktop TTS cleanly
+        if not ON_ANDROID and _desktop_tts is not None:
+            try:
+                _desktop_tts.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
