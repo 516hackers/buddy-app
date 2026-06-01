@@ -8,10 +8,10 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# python3 and hostpython3 must be identical — prevents 3.14 being pulled in
+# Using Kivy 2.2.1 - more stable for Android builds than 2.3.0
+# python3 and hostpython3 must be identical
 # pyjnius and android have p4a recipes — never version-pin them
-# speech_recognition removed — no p4a recipe, no Android wheel
-requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,pyjnius,android,requests,urllib3,certifi,charset_normalizer,idna
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.2.1,pyjnius,android,requests,urllib3,certifi,charset_normalizer,idna
 
 orientation = portrait
 fullscreen = 0
@@ -22,7 +22,7 @@ android.api = 34
 android.minapi = 21
 android.ndk = 25b
 android.ndk_api = 21
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a,armeabi-v7a
 
 android.allow_backup = True
 
