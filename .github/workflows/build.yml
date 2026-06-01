@@ -2,7 +2,7 @@ name: Build APK
 on: [push]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -14,15 +14,28 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk zip unzip build-essential git libffi-dev libssl-dev autoconf libtool pkg-config
+          sudo apt-get install -y \
+            openjdk-17-jdk \
+            zip unzip \
+            build-essential \
+            git \
+            libffi-dev \
+            libssl-dev \
+            autoconf \
+            libtool \
+            pkg-config \
+            cmake
 
       - name: Install Python dependencies
         run: |
-          pip install buildozer cython==0.29.33 kivy
+          pip install --upgrade pip
+          pip install cython==0.29.33
+          pip install buildozer
+          pip install kivy
 
       - name: Create buildozer.spec
         run: |
-          cat > buildozer.spec << 'EOF'
+          cat > buildozer.spec << 'SPEC'
           [app]
           title = Buddy Assistant
           package.name = buddyassistant
@@ -33,18 +46,33 @@ jobs:
           requirements = python3,kivy,speechrecognition
           orientation = portrait
           android.permissions = INTERNET,RECORD_AUDIO,MODIFY_AUDIO_SETTINGS
-          android.api = 31
+          android.api = 33
           android.minapi = 21
+          android.ndk = 25b
           android.accept_sdk_license = True
+          android.archs = arm64-v8a
+          log_level = 2
+
           [buildozer]
           log_level = 2
-          EOF
+          warn_on_root = 1
+          SPEC
+
+      - name: Accept Android licenses
+        run: |
+          mkdir -p ~/.android
+          touch ~/.android/repositories.cfg
+          echo "count=0" > ~/.android/repositories.cfg
 
       - name: Build APK
-        run: yes | buildozer android debug
+        env:
+          ANDROID_SDK_ROOT: /home/runner/.buildozer/android/platform/android-sdk
+        run: |
+          buildozer android debug
 
-      - name: Upload APK
+      - name: Find and upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BuddyAssistant-APK
           path: bin/*.apk
+          if-no-files-found: warn
