@@ -8,11 +8,9 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# Rules for Android requirements:
-# - pyjnius, kivy, android → p4a has built-in recipes, DO NOT version-pin them
-# - speech_recognition has no recipe and no Android wheel → removed; use Android native STT via pyjnius
-# - python3/hostpython3 must be identical and pinned to avoid 3.14 pulling in
-# - pure-Python packages (requests etc.) are fine as-is
+# python3 and hostpython3 must be identical — prevents 3.14 being pulled in
+# pyjnius and android have p4a recipes — never version-pin them
+# speech_recognition removed — no p4a recipe, no Android wheel
 requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,pyjnius,android,requests,urllib3,certifi,charset_normalizer,idna
 
 orientation = portrait
@@ -27,6 +25,9 @@ android.ndk_api = 21
 android.archs = arm64-v8a, armeabi-v7a
 
 android.allow_backup = True
+
+# Hook to pin pip inside p4a venvs before package installation
+p4a.hook = buildozer/p4a_hook.py
 
 [buildozer]
 log_level = 2
