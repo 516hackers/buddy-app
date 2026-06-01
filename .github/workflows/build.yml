@@ -4,122 +4,25 @@ on:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install system packages
+      - name: Build APK with official Kivy Docker image
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            zip unzip build-essential git \
-            libffi-dev libssl-dev autoconf \
-            libtool pkg-config cmake \
-            libltdl-dev \
-            zlib1g-dev libncurses5-dev \
-            libncursesw5-dev libreadline-dev \
-            libsqlite3-dev libgdbm-dev \
-            libbz2-dev liblzma-dev \
-            lld llvm python3-dev
+          docker run --rm \
+            -v ${{ github.workspace }}:/home/user/hostcwd \
+            ghcr.io/kivy/buildozer:latest \
+            android debug
 
-      - name: Install host Python packages
+      - name: Verify APK
         run: |
-          pip install --upgrade pip setuptools wheel
-          pip install "resolvelib==0.9.1"
-          pip install "cython==0.29.37" "buildozer==1.5.0"
-
-      - name: Install Android SDK command-line tools
-        run: |
-          export ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip \
-            -O /tmp/cmdline-tools.zip
-          unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract
-          mv /tmp/cmdline-tools-extract/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 || true
-          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "platform-tools" \
-            "ndk;25.1.8937393"
-          mkdir -p "$ANDROID_SDK_ROOT/tools/bin"
-          ln -sf "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.1.8937393" >> $GITHUB_ENV
-
-      - name: Pre-accept Android SDK licences
-        run: |
-          mkdir -p ~/.android
-          echo "count=0" > ~/.android/repositories.cfg
-          mkdir -p "$HOME/.buildozer/android/platform/android-sdk/licenses"
-          printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55' \
-            > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-license"
-          printf '\n84831b9409646a918e30573bab4c9c91346d8abd' \
-            > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license"
-          printf '\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' \
-            > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-arm-dbt-license"
-
-      - name: Create p4a pip-fix hook
-        run: |
-          mkdir -p buildozer
-          python3 << 'ENDPYTHON'
-with open('buildozer/p4a_hook.py', 'w') as f:
-    f.write("""import subprocess
-import sys
-import os
-
-def before_apk_build(arch):
-    pass
-
-def after_apk_build(arch):
-    pass
-
-def before_pip_install(arch):
-    try:
-        subprocess.check_call([
-            sys.executable, "-m", "pip",
-            "install", "--upgrade", "pip==23.3.2",
-            "setuptools", "wheel"
-        ])
-    except Exception:
-        pass
-""")
-ENDPYTHON
-          echo "Hook written:"
-          cat buildozer/p4a_hook.py
-
-      - name: Build APK
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: |
-          set -o pipefail
-          buildozer -v android debug 2>&1 | tee build.log
-
-      - name: Verify and locate APK
-        run: |
-          echo "=== Searching for APK ==="
-          APK=$(find .buildozer -name "*.apk" 2>/dev/null | head -1)
+          APK=$(find ${{ github.workspace }}/bin -name "*.apk" 2>/dev/null | head -1)
           if [ -z "$APK" ]; then
-            echo "ERROR: No APK produced. Last 150 lines of build log:"
-            echo "======================================================="
-            tail -150 build.log
+            echo "ERROR: No APK produced"
             exit 1
           fi
           echo "Found APK: $APK"
@@ -128,14 +31,6 @@ ENDPYTHON
         uses: actions/upload-artifact@v4
         with:
           name: BuddyAssistant-APK
-          path: .buildozer/android/platform/build-*/dists/*/bin/*.apk
+          path: bin/*.apk
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
-          retention-days: 14
