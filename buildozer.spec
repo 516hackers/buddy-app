@@ -1,6 +1,6 @@
 [app]
 title            = Buddy Assistant
-package.name     = buddyassistant
+package.name     = buddyassistant 
 package.domain   = org.buddy
 
 source.dir       = .
