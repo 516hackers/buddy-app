@@ -39,6 +39,9 @@ jobs:
       - name: Install host Python packages
         run: |
           pip install --upgrade pip setuptools wheel
+          # resolvelib must be <1.0 â€” pip 23+ vendors a newer resolvelib that
+          # breaks p4a's internal pip bootstrap (RequirementInformation import error)
+          pip install "resolvelib<1.0.0"
           pip install "cython==0.29.37" "buildozer==1.5.0" "kivy==2.3.0"
 
       - name: Install Android SDK command-line tools
@@ -80,6 +83,37 @@ jobs:
             > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-preview-license"
           printf '\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' \
             > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-arm-dbt-license"
+
+      - name: Create p4a pip-fix hook
+        run: |
+          mkdir -p buildozer
+          cat > buildozer/p4a_hook.py << 'HOOK'
+import subprocess, sys, os
+
+def before_apk_build(arch):
+    pass
+
+def after_apk_build(arch):
+    pass
+
+def before_pip_install(arch):
+    """
+    Downgrade pip inside every p4a venv before package installation.
+    Prevents the RequirementInformation / resolvelib version mismatch.
+    """
+    venv_pip = os.path.join(
+        os.environ.get("PYTHONPATH", ""),
+        "bin", "pip"
+    )
+    try:
+        subprocess.check_call([
+            sys.executable, "-m", "pip",
+            "install", "--upgrade", "pip==23.3.2",
+            "setuptools", "wheel"
+        ])
+    except Exception:
+        pass
+HOOK
 
       - name: Build APK
         env:
