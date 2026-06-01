@@ -39,8 +39,6 @@ jobs:
       - name: Install host Python packages
         run: |
           pip install --upgrade pip setuptools wheel
-          # resolvelib must be <1.0 â€” pip 23+ vendors a newer resolvelib that
-          # breaks p4a's internal pip bootstrap (RequirementInformation import error)
           pip install "resolvelib<1.0.0"
           pip install "cython==0.29.37" "buildozer==1.5.0" "kivy==2.3.0"
 
@@ -48,27 +46,20 @@ jobs:
         run: |
           export ANDROID_SDK_ROOT="$HOME/.buildozer/android/platform/android-sdk"
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
-
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip \
             -O /tmp/cmdline-tools.zip
-
           unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools-extract
           mv /tmp/cmdline-tools-extract/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
-
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-
           yes | sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 || true
-
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "platform-tools" \
             "ndk;25.1.8937393"
-
           mkdir -p "$ANDROID_SDK_ROOT/tools/bin"
           ln -sf "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
             "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
-
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.1.8937393" >> $GITHUB_ENV
 
@@ -87,33 +78,9 @@ jobs:
       - name: Create p4a pip-fix hook
         run: |
           mkdir -p buildozer
-          cat > buildozer/p4a_hook.py << 'HOOK'
-import subprocess, sys, os
-
-def before_apk_build(arch):
-    pass
-
-def after_apk_build(arch):
-    pass
-
-def before_pip_install(arch):
-    """
-    Downgrade pip inside every p4a venv before package installation.
-    Prevents the RequirementInformation / resolvelib version mismatch.
-    """
-    venv_pip = os.path.join(
-        os.environ.get("PYTHONPATH", ""),
-        "bin", "pip"
-    )
-    try:
-        subprocess.check_call([
-            sys.executable, "-m", "pip",
-            "install", "--upgrade", "pip==23.3.2",
-            "setuptools", "wheel"
-        ])
-    except Exception:
-        pass
-HOOK
+          echo "aW1wb3J0IHN1YnByb2Nlc3MsIHN5cywgb3MKCmRlZiBiZWZvcmVfYXBrX2J1aWxkKGFyY2gpOgogICAgcGFzcwoKZGVmIGFmdGVyX2Fwa19idWlsZChhcmNoKToKICAgIHBhc3MKCmRlZiBiZWZvcmVfcGlwX2luc3RhbGwoYXJjaCk6CiAgICB0cnk6CiAgICAgICAgc3VicHJvY2Vzcy5jaGVja19jYWxsKFsKICAgICAgICAgICAgc3lzLmV4ZWN1dGFibGUsICItbSIsICJwaXAiLAogICAgICAgICAgICAiaW5zdGFsbCIsICItLXVwZ3JhZGUiLCAicGlwPT0yMy4zLjIiLAogICAgICAgICAgICAic2V0dXB0b29scyIsICJ3aGVlbCIKICAgICAgICBdKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBwYXNzCg==" | base64 -d > buildozer/p4a_hook.py
+          echo "Hook written:"
+          cat buildozer/p4a_hook.py
 
       - name: Build APK
         env:
