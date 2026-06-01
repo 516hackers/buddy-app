@@ -12,9 +12,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Verify Java version
-        run: java -version
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -24,22 +21,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            zip unzip \
-            build-essential \
-            git \
-            libffi-dev \
-            libssl-dev \
-            autoconf \
-            libtool \
-            pkg-config \
-            cmake
+            zip unzip build-essential git \
+            libffi-dev libssl-dev autoconf \
+            libtool pkg-config cmake
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install cython==0.29.33
-          pip install buildozer
-          pip install kivy
+          pip install cython==0.29.33 buildozer kivy
 
       - name: Create buildozer.spec
         run: |
@@ -59,6 +48,7 @@ jobs:
           android.ndk = 25b
           android.accept_sdk_license = True
           android.archs = arm64-v8a
+          fullscreen = 0
           log_level = 2
 
           [buildozer]
@@ -69,18 +59,12 @@ jobs:
       - name: Accept Android licenses
         run: |
           mkdir -p ~/.android
-          touch ~/.android/repositories.cfg
           echo "count=0" > ~/.android/repositories.cfg
-          export JAVA_HOME=$JAVA_HOME_17_X64
-          export PATH=$JAVA_HOME/bin:$PATH
 
       - name: Build APK
         env:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: |
-          export PATH=$JAVA_HOME/bin:$PATH
-          java -version
-          buildozer android debug
+        run: buildozer android debug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
