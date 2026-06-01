@@ -1,4 +1,4 @@
-name: Build APK – Buddy Advanced
+name: Build APK
 
 on:
   push:
@@ -12,23 +12,19 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 2. Java 17 ─────────────────────────────────────────────────────
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── 3. Python 3.10 ─────────────────────────────────────────────────
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # ── 4. System packages needed by p4a / NDK / Kivy ──────────────────
       - name: Install system packages
         run: |
           sudo apt-get update -y
@@ -41,105 +37,13 @@ jobs:
             libncursesw5-dev libreadline-dev \
             libsqlite3-dev libgdbm-dev \
             libbz2-dev liblzma-dev \
-            lld llvm \
-            python3-dev
+            lld llvm python3-dev
 
-      # ── 5. Python build tools (host only – NOT bundled in APK) ─────────
       - name: Install host Python packages
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install \
-            "cython==0.29.37" \
-            "buildozer==1.5.0" \
-            "kivy==2.3.0"
+          pip install "cython==0.29.37" "buildozer==1.5.0" "kivy==2.3.0"
 
-      # ── 6. Write buildozer.spec ─────────────────────────────────────────
-      #
-      #  requirements = everything that must be compiled & bundled INSIDE
-      #                 the APK by python-for-android (p4a).
-      #
-      #  Key packages and why they're here:
-      #   python3          – the CPython interpreter itself
-      #   kivy             – UI framework
-      #   pyjnius          – lets Python call Android Java APIs (TTS, intents)
-      #   speechrecognition– SpeechRecognition library (pure Python, uses
-      #                      Google Web Speech API over INTERNET)
-      #   requests         – HTTP client used internally by speechrecognition
-      #   urllib3          – HTTP transport (requests dependency)
-      #   certifi          – TLS root certificates for HTTPS calls
-      #   charset-normalizer– requests dependency (encoding detection)
-      #   idna             – requests dependency (international domain names)
-      #   audioread        – audio file decoding (speechrecognition dep)
-      #   pyaudio          – mic access on Android via OpenSL ES
-      #                      (p4a has a recipe for this)
-      #
-      #  NOT included:
-      #   pyttsx3  – uses espeak/SAPI/nsss which don't exist on Android.
-      #              We use Android's built-in TTS via pyjnius instead.
-      #
-      - name: Write buildozer.spec
-        run: |
-          cat > buildozer.spec << 'SPEC'
-[app]
-title            = Buddy Assistant
-package.name     = buddyassistant
-package.domain   = org.buddy
-
-source.dir       = .
-source.include_exts = py,png,jpg,kv,atlas,json
-
-version = 2.0
-
-# ── ALL packages bundled inside the APK ─────────────────────────────────
-# python-for-android (p4a) has built-in recipes for all of these.
-# Versions after == pin to what p4a recipes expect; omit == for latest.
-requirements = \
-    python3,\
-    kivy==2.3.0,\
-    pyjnius,\
-    speechrecognition,\
-    requests,\
-    urllib3,\
-    certifi,\
-    charset-normalizer,\
-    idna,\
-    audioread,\
-    pyaudio
-
-orientation  = portrait
-fullscreen   = 0
-
-# Android permissions
-android.permissions = \
-    INTERNET,\
-    RECORD_AUDIO,\
-    MODIFY_AUDIO_SETTINGS,\
-    READ_PHONE_STATE,\
-    CHANGE_AUDIO_SETTINGS,\
-    FOREGROUND_SERVICE,\
-    WAKE_LOCK
-
-android.api    = 34
-android.minapi = 24
-android.ndk    = 25b
-
-android.accept_sdk_license = True
-android.archs  = arm64-v8a
-
-# Declare microphone hardware requirement
-android.features = android.hardware.microphone
-
-# p4a branch
-p4a.branch = master
-
-log_level = 2
-
-[buildozer]
-log_level    = 2
-warn_on_root = 1
-SPEC
-
-      # ── 7. Pre-accept Android SDK licences ─────────────────────────────
       - name: Pre-accept Android SDK licences
         run: |
           mkdir -p ~/.android
@@ -152,23 +56,19 @@ SPEC
           printf '\nd56f5187479451eabf01fb78af6dfcb131a6481e\n' \
             > "$HOME/.buildozer/android/platform/android-sdk/licenses/android-sdk-arm-dbt-license"
 
-      # ── 8. Build APK ───────────────────────────────────────────────────
-      - name: Build APK (debug)
+      - name: Build APK
         env:
           JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: |
-          buildozer -v android debug 2>&1 | tee build.log
+        run: buildozer -v android debug 2>&1 | tee build.log
 
-      # ── 9. Upload APK ──────────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BuddyAssistant-v2-APK
+          name: BuddyAssistant-APK
           path: bin/*.apk
           if-no-files-found: warn
           retention-days: 30
 
-      # ── 10. Always upload build log (helps debug failures) ─────────────
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
