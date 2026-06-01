@@ -79,7 +79,7 @@ jobs:
       - name: Create p4a pip-fix hook
         run: |
           mkdir -p buildozer
-          cat > buildozer/p4a_hook.py << 'EOF'
+          cat > buildozer/p4a_hook.py << 'PYTHON_EOF'
 import subprocess
 import sys
 import os
@@ -99,7 +99,7 @@ def before_pip_install(arch):
         ])
     except Exception:
         pass
-EOF
+PYTHON_EOF
           echo "Hook written:"
           cat buildozer/p4a_hook.py
 
