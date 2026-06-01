@@ -92,7 +92,6 @@ def after_apk_build(arch):
 
 def before_pip_install(arch):
     try:
-        # Pin pip to a working version that's compatible with resolvelib 0.9.1
         subprocess.check_call([
             sys.executable, "-m", "pip",
             "install", "--upgrade", "pip==23.3.2",
