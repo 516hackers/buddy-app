@@ -4,16 +4,22 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y openjdk-17-jdk zip unzip build-essential git libffi-dev libssl-dev
+          sudo apt-get install -y openjdk-17-jdk zip unzip build-essential git libffi-dev libssl-dev autoconf libtool pkg-config
+
+      - name: Install Python dependencies
+        run: |
           pip install buildozer cython==0.29.33 kivy
+
       - name: Create buildozer.spec
         run: |
           cat > buildozer.spec << 'EOF'
@@ -33,10 +39,12 @@ jobs:
           [buildozer]
           log_level = 2
           EOF
+
       - name: Build APK
         run: yes | buildozer android debug
+
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: BuddyAssistant-APK
           path: bin/*.apk
