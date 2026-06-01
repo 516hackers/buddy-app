@@ -8,9 +8,10 @@ source.include_exts = py,png,jpg,kv,atlas,json
 
 version = 1.0.0
 
-# Python 3.11 + Kivy 2.3.0 — confirmed compatible combination
-# Python 3.12/3.13/3.14 all break Kivy 2.3.0 Cython C API (_PyLong_AsByteArray signature)
-requirements = python3==3.11.9,kivy==2.3.0,pyjnius,speech_recognition,requests,urllib3,certifi,charset_normalizer,idna
+# Both python3 and hostpython3 MUST be identical versions
+# hostpython3 is the Python compiled for the build host (used during cross-compilation)
+# python3 is the Python bundled into the APK
+requirements = python3==3.11.9,hostpython3==3.11.9,kivy==2.3.0,pyjnius,speech_recognition,requests,urllib3,certifi,charset_normalizer,idna
 
 orientation = portrait
 fullscreen = 0
