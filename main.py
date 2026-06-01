@@ -1145,5 +1145,3 @@ class BuddyAssistantApp(App):
 if __name__ == "__main__":
     BuddyAssistantApp().run()
 
-
-written
