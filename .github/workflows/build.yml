@@ -1,10 +1,19 @@
 name: Build APK
-on: [push]
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -23,52 +32,90 @@ jobs:
           sudo apt-get install -y \
             zip unzip build-essential git \
             libffi-dev libssl-dev autoconf \
-            libtool pkg-config cmake
+            libtool pkg-config cmake \
+            zlib1g-dev libncurses5-dev \
+            libncursesw5-dev libreadline-dev \
+            libsqlite3-dev libgdbm-dev \
+            libdb5.3-dev libbz2-dev libexpat1-dev \
+            liblzma-dev tk-dev libxml2-dev \
+            libxmlsec1-dev libffi-dev liblzma-dev \
+            wget curl
 
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          pip install cython==0.29.33 buildozer kivy
+          pip install cython==0.29.33
+          pip install buildozer
+          pip install jinja2
 
-      - name: Create buildozer.spec
+      - name: Configure Buildozer
         run: |
-          cat > buildozer.spec << 'SPEC'
-          [app]
-          title = Buddy Assistant
-          package.name = buddyassistant
-          package.domain = org.buddy
-          source.dir = .
-          source.include_exts = py
-          version = 1.0
-          requirements = python3,kivy,speechrecognition
-          orientation = portrait
-          android.permissions = INTERNET,RECORD_AUDIO,MODIFY_AUDIO_SETTINGS
-          android.api = 33
-          android.minapi = 21
-          android.ndk = 25b
-          android.accept_sdk_license = True
-          android.archs = arm64-v8a
-          fullscreen = 0
-          log_level = 2
-
-          [buildozer]
-          log_level = 2
-          warn_on_root = 1
-          SPEC
-
-      - name: Accept Android licenses
-        run: |
+          # Create .buildozer directory
+          mkdir -p ~/.buildozer
+          
+          # Accept Android SDK licenses
           mkdir -p ~/.android
           echo "count=0" > ~/.android/repositories.cfg
+          
+          # Create default buildozer spec if not exists
+          if [ ! -f buildozer.spec ]; then
+            buildozer init
+          fi
 
-      - name: Build APK
-        env:
-          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
-        run: buildozer android debug
+      - name: Build with Buildozer
+        run: |
+          # Build debug APK
+          buildozer -v android debug
+          
+          # If debug build fails, try with clean
+          if [ $? -ne 0 ]; then
+            echo "Debug build failed, trying clean build..."
+            buildozer android clean
+            buildozer -v android debug
+          fi
 
-      - name: Upload APK
+      - name: List built files
+        run: |
+          echo "Listing bin directory:"
+          ls -la bin/ || echo "bin directory not found"
+          
+          echo "Listing current directory:"
+          ls -la
+
+      - name: Upload APK - arm64-v8a
         uses: actions/upload-artifact@v4
         with:
-          name: BuddyAssistant-APK
+          name: BuddyAssistant-arm64-v8a
+          path: bin/*arm64-v8a*.apk
+          if-no-files-found: warn
+
+      - name: Upload APK - armeabi-v7a
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuddyAssistant-armeabi-v7a
+          path: bin/*armeabi-v7a*.apk
+          if-no-files-found: warn
+
+      - name: Upload APK - universal
+        uses: actions/upload-artifact@v4
+        with:
+          name: BuddyAssistant-universal
           path: bin/*.apk
           if-no-files-found: warn
+
+      - name: Upload build logs (if build failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-logs
+          path: |
+            .buildozer/logs/
+            buildozer.log
+          if-no-files-found: ignore
+
+      - name: Clean up
+        if: always()
+        run: |
+          # Clean up to free space
+          rm -rf .buildozer/.cache
+          rm -rf ~/.ccache
